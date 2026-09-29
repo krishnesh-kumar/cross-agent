@@ -1,0 +1,12 @@
+boot:.c/S+.c/I
+ag:c,g,p,m,h
+ty:F,D,K,H,R,Q,X,S,C,N
+st:L,X,!
+ks:op,ow,nr,fl,dn,hd
+row:id|ts|ag|ty|st|k|refs|txt
+w:+1 .c/e/YYMMDD;1I;S
+1st:A then S+I;ret:S+I
+self!dn
+!secret
+S.l=ag:ts+2h
+mcp/a2a:wrap only
