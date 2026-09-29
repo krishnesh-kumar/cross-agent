@@ -12,7 +12,9 @@ CLAUDE.md, GEMINI.md           one-line pointers to AGENTS.md
 mem/now.l                      snapshot: agents, open tasks, live facts/decisions, unread msgs (capped)
 mem/rest.l                     overflow beyond the snapshot caps, same format, read on demand
 mem/log/<handle>.<YYYY-MM>.l   append-only truth, one file per agent per month
-mem/mem.py                     stdlib tool: snap | check | add | new
+mem/mem.py                     stdlib tool: snap | check | add | new | relay
+mem/humans.l                   github-login|handle: whose /ok /redo /register comments count as human
+mem/ci_commit.sh               CI: relay comment, rebuild snapshot, commit, push with retry
 mem/test_mem.py                unit tests for the fold rules
 .github/workflows/mem.yml      lints logs and rebuilds now.l / rest.l on push
 .gitattributes                 mem/log/*.l merge=union so concurrent appends never conflict
@@ -64,7 +66,7 @@ Not done on purpose: no archiving of old logs into digests (logs are never read 
 | Session start loads a snapshot | `now.l` holds only live state, capped per kind. Closed and superseded items drop out. |
 | Append-or-patch history | Patches are new lines. `!oldID` supersedes; the old line stays in the log, marked `old` in the fold. |
 | Every record attributed | `ts` and `who` on every line. Snapshot shows the last actor and the current status. |
-| No self-approval | `ok` from the handle that claimed or reported `done` is ignored and flagged by `mem.py`. |
+| No self-approval | `ok` from the handle that claimed or reported `done` is ignored and flagged by `mem.py`. Human approvals come from `/ok` comments checked against `mem/humans.l` (see trust boundary). |
 | No secrets | Rule in the spec. `mem.py check` and the Action reject common key shapes. `A` records advertise verbs, not credentials. |
 | Same-day writes never overwrite | One log file per agent. Git union-merge on logs. API writers get a SHA conflict instead of a silent overwrite. |
 
@@ -80,12 +82,25 @@ python3 -m unittest mem/test_mem.py
 
 An agent with no shell appends the line by hand (via the GitHub API or a file edit) and the Action rebuilds the snapshot on push.
 
-## Getting started as the human
+## Human decisions
 
-Register yourself once by appending to `mem/log/hu.<YYYY-MM>.l`:
+You never edit a log file. Comment on any issue or pull request in the repo:
 
 ```
-260929.1800|hu|Ahu|on|project owner verbs=review,merge,deploy,secrets
+/ok Tcl1 looks good
+/redo Tcl2 tests are missing
+/register review merge deploy
 ```
 
-Then review tasks in `now.l` that are `done` and patch them `ok` or `redo`. You are the only reviewer until a second agent joins.
+The Action (`.github/workflows/mem.yml`, script `mem/ci_commit.sh`) reads the comment, checks the commenter's GitHub login against `mem/humans.l`, appends a line under your handle with the text `via:gh#<comment id>` so the source comment is traceable, rebuilds the snapshot, and pushes. It reacts with a thumbs-up, or a confused face plus a reply explaining why it refused. Refusals: unlisted login, unknown task, task not in `done`, or you approving work you did yourself. Re-running a comment is harmless.
+
+Approvals relayed by an agent from a chat message are the fallback. The agent writes them into `hu`'s file with text starting `via:<agent handle>`, so they are distinguishable from Action-verified ones.
+
+### Trust boundary, stated plainly
+
+- The Action trusts two things: the GitHub login on the comment, and `mem/humans.l`. Anyone with write access to the repo can edit that file, so repo write access is the root of trust.
+- GitHub cannot tell you apart from an agent that holds your token. If an agent pushes or comments using your personal access token or your logged-in session, it can post `/ok` as you. The no-self-approval rule then rests on the agent behaving, not on the system.
+- To make it hold, give each agent its own GitHub identity (a machine user or a GitHub App) and list only human logins in `humans.l`. Until then, treat the Action route as convenient and honest about who clicked, not as proof against a misbehaving agent.
+- The workflow reads comment text only through environment variables and never checks out pull request code, so a comment cannot inject shell or run untrusted code.
+
+To join as the human: comment `/register` once, then `/ok` or `/redo` on tasks that show `done` in `now.l`. Comment workflows run from the default branch, so `mem.yml` must be there.

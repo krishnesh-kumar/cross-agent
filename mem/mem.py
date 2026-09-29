@@ -5,6 +5,7 @@
   mem.py check                         lint logs; exit 1 on errors
   mem.py add WHO KIND|ID STATUS TEXT   append one record (mints id if KIND), then snap
   mem.py new                           print log lines at or after now.l upto= (may repeat a few)
+  mem.py relay                         CI: turn a human's /ok /redo /register comment (env LOGIN REF BODY) into a record
 """
 import glob
 import os
@@ -17,6 +18,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 LOG = os.path.join(ROOT, "log")
 NOW = os.path.join(ROOT, "now.l")
 REST = os.path.join(ROOT, "rest.l")
+HUMANS = os.path.join(ROOT, "humans.l")  # github-login|handle, the trust root for relayed human decisions
 
 TS = re.compile(r"^\d{6}\.\d{4}$")  # YYMMDD.HHMM UTC
 WHO = re.compile(r"^[a-z]{2,5}$")
@@ -36,6 +38,7 @@ TASK_ORDER = {"done": 0, "redo": 1, "block": 2, "claim": 3, "open": 4}
 CAP = {"A": 50, "T": 25, "F": 40, "D": 15, "M": 10}  # snapshot rows per kind; the rest go to rest.l
 MAXLEN = {"F": 120}
 MAXTEXT = 200
+CMD = re.compile(r"^/(ok|redo|register)\b[ \t]*(.*)$")
 SECRETS = [
     re.compile(p)
     for p in (
@@ -207,7 +210,8 @@ def cmd_new():
     return 0
 
 
-def cmd_add(who, kid, status, text):
+def _append(who, kid, status, text):
+    """Validate and append one record to who's log for this month. Returns the line. Exits with a message on bad input."""
     if not WHO.match(who):
         sys.exit("bad handle %r: 2-5 lowercase letters" % who)
     if "|" in text or "\n" in text:
@@ -239,8 +243,77 @@ def cmd_add(who, kid, status, text):
     line = fmt(Rec(ts, who, rid, status, text, "", 0))
     with open(path, "a", encoding="utf-8") as fh:
         fh.write(line + "\n")
-    print(line)
+    return line
+
+
+def cmd_add(who, kid, status, text):
+    print(_append(who, kid, status, text))
     return cmd_snap()
+
+
+def humans():
+    out = {}
+    if os.path.exists(HUMANS):
+        with open(HUMANS, encoding="utf-8") as fh:
+            for raw in fh:
+                raw = raw.strip()
+                if raw and not raw.startswith("#") and "|" in raw:
+                    login, handle = (x.strip() for x in raw.split("|", 1))
+                    if WHO.match(handle):
+                        out[login.lower()] = handle
+    return out
+
+
+def cmd_relay(login=None, ref=None, body=None):
+    """Record /ok /redo /register lines from a GitHub comment as the human handle mapped to the commenter.
+    Only logins listed in humans.l count. Prints 'recorded ...' or 'rejected: ...' per command. Idempotent per comment id."""
+    login = os.environ.get("LOGIN", "") if login is None else login
+    ref = os.environ.get("REF", "") if ref is None else ref
+    body = os.environ.get("BODY", "") if body is None else body
+    cmds = [m for m in (CMD.match(l.strip()) for l in body.splitlines()) if m]
+    if not cmds:
+        return 0
+    handle = humans().get(login.lower())
+    if not handle:
+        print("rejected: %s is not listed in mem/humans.l, so this comment does not count as a human decision" % login)
+        return 0
+    if not re.match(r"^[0-9]+$", ref):
+        print("rejected: missing comment id")
+        return 0
+    tag = "via:gh#" + ref
+    for m in cmds:
+        verb, rest = m.group(1), m.group(2).strip()
+        recs, _ = load()
+        st, _ = fold(recs)
+        if verb == "register":
+            rid, status, note = "A" + handle, "on", rest or "human"
+        else:
+            parts = rest.split(None, 1)
+            rid, status, note = (parts[0] if parts else ""), verb, (parts[1] if len(parts) > 1 else "")
+        if any(r.id == rid and r.who == handle and (r.text == tag or r.text.startswith(tag + " ")) for r in recs):
+            print("recorded %s %s (already present)" % (rid, status))
+            continue
+        if verb != "register":
+            e = st.get(rid)
+            if e is None or e["kind"] != "T":
+                print("rejected: /%s needs an existing task id, got %r" % (verb, rid))
+                continue
+            if e["status"] != "done":
+                print("rejected: %s is %s, only a done task can be reviewed" % (rid, e["status"]))
+                continue
+            if status == "ok" and e["owner"] == handle:
+                print("rejected: %s did the work on %s, a different handle must approve" % (handle, rid))
+                continue
+        note = " ".join(note.replace("|", "/").split())
+        text = tag + (" " + note if note else "")
+        text = text[:MAXTEXT]
+        try:
+            _append(handle, rid, status, text)
+        except SystemExit as ex:
+            print("rejected: %s" % ex.code)
+            continue
+        print("recorded %s %s" % (rid, status))
+    return 0
 
 
 def main(argv):
@@ -251,6 +324,8 @@ def main(argv):
         return cmd_check()
     if cmd == "new":
         return cmd_new()
+    if cmd == "relay":
+        return cmd_relay()
     if cmd == "add" and len(argv) == 6:
         return cmd_add(*argv[2:6])
     print(__doc__.strip())

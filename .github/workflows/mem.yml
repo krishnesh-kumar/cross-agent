@@ -1,4 +1,5 @@
-# Keeps mem/now.l in sync with the logs on every push and rejects bad or secret-bearing records.
+# Keeps mem/now.l in sync with the logs, rejects bad or secret-bearing records, and records human
+# decisions made as issue or PR comments: /ok <id>, /redo <id>, /register. Only logins in mem/humans.l count.
 # Optional: agents that can run python3 can rebuild the snapshot themselves.
 name: mem
 on:
@@ -6,13 +7,19 @@ on:
     paths: ["mem/**", "AGENTS.md"]
   pull_request:
     paths: ["mem/**"]
+  issue_comment:
+    types: [created]
 permissions:
   contents: write
+  issues: write
+  pull-requests: write
 concurrency:
   group: mem-${{ github.ref }}
   cancel-in-progress: false
 jobs:
   snap:
+    # comment events run only when the comment has a slash command; they always run on the default branch
+    if: github.event_name != 'issue_comment' || contains(github.event.comment.body, '/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,23 +27,13 @@ jobs:
         run: python3 mem/mem.py check
       - name: unit tests
         run: python3 -m unittest -q mem/test_mem.py
-      - name: rebuild snapshot
-        run: python3 mem/mem.py snap
-      - name: commit snapshot
-        if: github.event_name == 'push'
-        run: |
-          git config user.name "mem-bot"
-          git config user.email "mem-bot@users.noreply.github.com"
-          git add mem/now.l mem/rest.l
-          git diff --cached --quiet && exit 0
-          git commit -m "mem: rebuild snapshot [skip ci]"
-          for i in 1 2 3; do
-            git push && exit 0
-            git fetch origin "$GITHUB_REF_NAME"
-            git reset --hard "origin/$GITHUB_REF_NAME"
-            python3 mem/mem.py snap
-            git add mem/now.l mem/rest.l
-            git diff --cached --quiet && exit 0
-            git commit -m "mem: rebuild snapshot [skip ci]"
-          done
-          exit 1
+      - name: relay, rebuild snapshot, commit
+        if: github.event_name != 'pull_request'
+        env:
+          # untrusted comment text goes through env, never into the script text
+          BODY: ${{ github.event.comment.body }}
+          LOGIN: ${{ github.event.comment.user.login }}
+          REF: ${{ github.event.comment.id }}
+          NUMBER: ${{ github.event.issue.number }}
+          GH_TOKEN: ${{ github.token }}
+        run: bash mem/ci_commit.sh
