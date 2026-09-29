@@ -1,0 +1,42 @@
+# Keeps mem/now.l in sync with the logs on every push and rejects bad or secret-bearing records.
+# Optional: agents that can run python3 can rebuild the snapshot themselves.
+name: mem
+on:
+  push:
+    paths: ["mem/**", "AGENTS.md"]
+  pull_request:
+    paths: ["mem/**"]
+permissions:
+  contents: write
+concurrency:
+  group: mem-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  snap:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: lint records
+        run: python3 mem/mem.py check
+      - name: unit tests
+        run: python3 -m unittest -q mem/test_mem.py
+      - name: rebuild snapshot
+        run: python3 mem/mem.py snap
+      - name: commit snapshot
+        if: github.event_name == 'push'
+        run: |
+          git config user.name "mem-bot"
+          git config user.email "mem-bot@users.noreply.github.com"
+          git add mem/now.l
+          git diff --cached --quiet && exit 0
+          git commit -m "mem: rebuild snapshot [skip ci]"
+          for i in 1 2 3; do
+            git push && exit 0
+            git fetch origin "$GITHUB_REF_NAME"
+            git reset --hard "origin/$GITHUB_REF_NAME"
+            python3 mem/mem.py snap
+            git add mem/now.l
+            git diff --cached --quiet && exit 0
+            git commit -m "mem: rebuild snapshot [skip ci]"
+          done
+          exit 1
