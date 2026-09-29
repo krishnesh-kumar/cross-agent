@@ -1,5 +1,4 @@
-# Keeps mem/now.l in sync with the logs, rejects bad or secret-bearing records, and records human
-# decisions made as issue or PR comments: /ok <id>, /redo <id>, /register. Only logins in mem/humans.l count.
+# Lints the logs, runs the tests, and keeps mem/now.l and mem/rest.l in sync on every push.
 # Optional: agents that can run python3 can rebuild the snapshot themselves.
 name: mem
 on:
@@ -7,36 +6,20 @@ on:
     paths: ["mem/**", "AGENTS.md"]
   pull_request:
     paths: ["mem/**"]
-  issue_comment:
-    types: [created]
 permissions:
   contents: write
-  issues: write
-  pull-requests: write
 concurrency:
   group: mem-${{ github.ref }}
   cancel-in-progress: false
 jobs:
   snap:
-    # comment events run only when the comment has a slash command; they always run on the default branch
-    if: github.event_name != 'issue_comment' || contains(github.event.comment.body, '/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # lint and tests gate pushes and PRs only. They never block recording a human decision.
       - name: lint records
-        if: github.event_name != 'issue_comment'
         run: python3 mem/mem.py check
       - name: unit tests
-        if: github.event_name != 'issue_comment'
         run: python3 -m unittest -q mem/test_mem.py
-      - name: relay, rebuild snapshot, commit
-        if: github.event_name != 'pull_request'
-        env:
-          # untrusted comment text goes through env, never into the script text
-          BODY: ${{ github.event.comment.body }}
-          LOGIN: ${{ github.event.comment.user.login }}
-          REF: ${{ github.event.comment.id }}
-          NUMBER: ${{ github.event.issue.number }}
-          GH_TOKEN: ${{ github.token }}
+      - name: rebuild snapshot and commit
+        if: github.event_name == 'push'
         run: bash mem/ci_commit.sh

@@ -18,7 +18,7 @@ Rules:
 - Append to your own file only. Never edit or delete a line. Never touch another handle's file.
 - Supersede, never delete: new F or D line with !oldID.
 - Review: after done, only a different handle than the claimer or doer may set ok or redo. Self-ok is ignored and flagged.
-- Human decisions arrive as issue or PR comments "/ok <id>", "/redo <id>", "/register" and the Action records them as hu with text via:gh#<comment id>. Never write hu lines yourself unless the human tells you to in chat; then start the text with via:<your handle>.
+- Human review: the human tells any agent in chat, e.g. "approve Tcl4" or "redo Tcl4, tests missing". Then run mem.py review <your handle> <id> ok|redo [note], or append to hu's file with text starting via:<your handle>. Only when the human said so in this conversation, never on your own reading.
 - Hand off: patch the T to open with a note of where you stopped. Continue: patch it to claim. Need a verb you lack: open a T with >handle of an agent that has it.
 - No secrets, ever: keys, tokens, cookies, passwords, .env contents. Advertise verbs, not credentials.
 - Push rejected: git pull --rebase (logs union-merge) or re-read the file SHA via API and append again. now.l conflict: keep either side, rebuild.

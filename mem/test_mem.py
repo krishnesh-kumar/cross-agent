@@ -18,9 +18,6 @@ class MemTest(unittest.TestCase):
         mem.LOG = os.path.join(self.tmp, "log")
         mem.NOW = os.path.join(self.tmp, "now.l")
         mem.REST = os.path.join(self.tmp, "rest.l")
-        mem.HUMANS = os.path.join(self.tmp, "humans.l")
-        with open(mem.HUMANS, "w") as fh:
-            fh.write("# comment\nOwner-Login|hu\n")
         os.makedirs(mem.LOG)
 
     def tearDown(self):
@@ -77,6 +74,13 @@ class MemTest(unittest.TestCase):
         self.assertIn("Fgpt1|live", snap)
         self.assertNotIn("Fcl1|old", snap)
 
+    def test_forward_reference_ok_but_never_created_warns(self):
+        self.write("cl", ["260901.1000|cl|Tcl1|drop|replaced by ^Tcl2", "260901.1001|cl|Tcl2|open|new one",
+                          "260901.1002|cl|Fcl1|live|see ^Tcl99"])
+        _, _, warns = self.state()
+        self.assertEqual(len(warns), 1)
+        self.assertIn("unknown Tcl99", warns[0])
+
     def test_format_errors(self):
         self.write("cl", [
             "260901.1000|gpt|Tgpt1|open|wrong file",
@@ -120,66 +124,32 @@ class MemTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             mem.cmd_add("cl", "F", "live", "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234")
 
-    def relay(self, login, ref, body):
+    def review(self, *args):
         import contextlib
         import io
-        buf = io.StringIO()
-        real = mem.utcnow
-        mem.utcnow = lambda: "260929.1200"
-        try:
-            with contextlib.redirect_stdout(buf):
-                mem.cmd_relay(login, ref, body)
-        finally:
-            mem.utcnow = real
-        return buf.getvalue()
+        with contextlib.redirect_stdout(io.StringIO()):
+            mem.cmd_review(*args)
 
-    def test_relay_ok_and_redo_from_listed_human(self):
-        self.write("cl", ["260901.1000|cl|Tcl1|done|did it", "260901.1001|cl|Tcl2|done|did it too"])
-        out = self.relay("owner-login", "111", "looks fine\n/ok Tcl1 ship it\n/redo Tcl2 tests missing | broken")
-        self.assertIn("recorded Tcl1 ok", out)
-        self.assertIn("recorded Tcl2 redo", out)
+    def test_review_records_human_decision_marked_via_agent(self):
+        self.write("cl", ["260901.1000|cl|Tcl1|done|did it", "260901.1001|cl|Tcl2|done|did more"])
+        self.review("cl", "Tcl1", "ok", "looks good | ship")
+        self.review("gpt", "Tcl2", "redo", "tests missing")
         st, errs, warns = self.state()
         self.assertEqual((st["Tcl1"]["status"], st["Tcl2"]["status"]), ("ok", "redo"))
         self.assertEqual((errs, warns), ([], []))
-        self.assertTrue(st["Tcl2"]["note"].startswith("via:gh#111 tests missing / broken"))
         self.assertEqual(st["Tcl1"]["who"], "hu")
+        self.assertEqual(st["Tcl1"]["note"], "via:cl looks good / ship")
+        self.assertEqual(st["Tcl2"]["note"], "via:gpt tests missing")
 
-    def test_relay_ignores_unlisted_login_and_plain_comments(self):
-        self.write("cl", ["260901.1000|cl|Tcl1|done|did it"])
-        self.assertEqual(self.relay("stranger", "5", "/ok Tcl1"), "rejected: stranger is not listed in mem/humans.l, so this comment does not count as a human decision\n")
-        self.assertEqual(self.relay("owner-login", "6", "just chatting, no command"), "")
-        st, _, _ = self.state()
-        self.assertEqual(st["Tcl1"]["status"], "done")
-        self.assertEqual(sorted(os.listdir(mem.LOG)), ["cl.2026-09.l"])
-
-    def test_relay_rejections(self):
+    def test_review_refuses_bad_requests(self):
         self.write("hu", ["260901.1000|hu|Thu1|done|human did this"])
-        self.write("cl", ["260901.1001|cl|Tcl1|open|not done yet"])
-        out = self.relay("owner-login", "7", "/ok Thu1\n/ok Tcl1\n/ok Tcl99\n/ok")
-        self.assertEqual(out.count("rejected"), 4, out)
-        self.assertIn("different handle", out)
-        self.assertIn("only a done task", out)
+        self.write("cl", ["260901.1001|cl|Tcl1|open|not done yet", "260901.1002|cl|Tcl2|done|ok"])
+        for args in (("cl", "Thu1", "ok"), ("cl", "Tcl1", "ok"), ("cl", "Tcl99", "ok"), ("cl", "Fcl1", "ok"),
+                     ("hu", "Tcl2", "ok"), ("cl", "Tcl2", "maybe"), ("cl", "Tcl2", "ok", "token=sk-abcdefghijklmnopqrstuvwxyz1234")):
+            with self.assertRaises(SystemExit, msg=str(args)):
+                self.review(*args)
         st, _, _ = self.state()
-        self.assertEqual(st["Thu1"]["status"], "done")
-
-    def test_relay_idempotent_and_register_and_secret(self):
-        self.write("cl", ["260901.1000|cl|Tcl1|done|did it"])
-        self.relay("owner-login", "9", "/register review merge")
-        self.relay("owner-login", "10", "/ok Tcl1")
-        again = self.relay("owner-login", "10", "/ok Tcl1")
-        self.assertIn("already present", again)
-        with open(os.path.join(mem.LOG, "hu.2026-09.l")) as fh:
-            self.assertEqual(len([l for l in fh if "|Tcl1|ok|" in l]), 1)
-        st, errs, _ = self.state()
-        self.assertIn("Ahu", st)
-        self.assertEqual(errs, [])
-        leak = self.relay("owner-login", "11", "/register token=sk-abcdefghijklmnopqrstuvwxyz1234")
-        self.assertIn("rejected", leak)
-
-    def test_relay_comment_id_must_be_numeric(self):
-        self.write("cl", ["260901.1000|cl|Tcl1|done|did it"])
-        self.assertIn("missing comment id", self.relay("owner-login", "", "/ok Tcl1"))
-        self.assertIn("missing comment id", self.relay("owner-login", "x; rm -rf", "/ok Tcl1"))
+        self.assertEqual((st["Thu1"]["status"], st["Tcl1"]["status"], st["Tcl2"]["status"]), ("done", "open", "done"))
 
 
 if __name__ == "__main__":
