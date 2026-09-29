@@ -115,7 +115,8 @@ class MemTest(unittest.TestCase):
         self.assertEqual(st["Tcl2"]["status"], "claim")
         self.assertTrue(os.path.exists(mem.NOW))
         self.assertTrue(os.path.exists(mem.REST))
-        self.assertTrue(os.listdir(mem.LOG)[0].endswith(".20" + mem.utcnow()[:2] + "-" + mem.utcnow()[2:4] + ".l"))
+        month = "20" + mem.utcnow()[:2] + "-" + mem.utcnow()[2:4]
+        self.assertEqual(sorted(os.listdir(mem.LOG)), ["cl.%s.l" % month, "gpt.%s.l" % month])
         with self.assertRaises(SystemExit):
             mem.cmd_add("cl", "F", "live", "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234")
 
@@ -123,8 +124,13 @@ class MemTest(unittest.TestCase):
         import contextlib
         import io
         buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            mem.cmd_relay(login, ref, body)
+        real = mem.utcnow
+        mem.utcnow = lambda: "260929.1200"
+        try:
+            with contextlib.redirect_stdout(buf):
+                mem.cmd_relay(login, ref, body)
+        finally:
+            mem.utcnow = real
         return buf.getvalue()
 
     def test_relay_ok_and_redo_from_listed_human(self):
@@ -144,7 +150,7 @@ class MemTest(unittest.TestCase):
         self.assertEqual(self.relay("owner-login", "6", "just chatting, no command"), "")
         st, _, _ = self.state()
         self.assertEqual(st["Tcl1"]["status"], "done")
-        self.assertEqual(os.listdir(mem.LOG), ["cl.2026-09.l"])
+        self.assertEqual(sorted(os.listdir(mem.LOG)), ["cl.2026-09.l"])
 
     def test_relay_rejections(self):
         self.write("hu", ["260901.1000|hu|Thu1|done|human did this"])
@@ -162,7 +168,7 @@ class MemTest(unittest.TestCase):
         self.relay("owner-login", "10", "/ok Tcl1")
         again = self.relay("owner-login", "10", "/ok Tcl1")
         self.assertIn("already present", again)
-        with open(os.path.join(mem.LOG, os.listdir(mem.LOG)[-1])) as fh:
+        with open(os.path.join(mem.LOG, "hu.2026-09.l")) as fh:
             self.assertEqual(len([l for l in fh if "|Tcl1|ok|" in l]), 1)
         st, errs, _ = self.state()
         self.assertIn("Ahu", st)

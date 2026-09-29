@@ -23,9 +23,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # lint and tests gate pushes and PRs only. They never block recording a human decision.
       - name: lint records
+        if: github.event_name != 'issue_comment'
         run: python3 mem/mem.py check
       - name: unit tests
+        if: github.event_name != 'issue_comment'
         run: python3 -m unittest -q mem/test_mem.py
       - name: relay, rebuild snapshot, commit
         if: github.event_name != 'pull_request'
