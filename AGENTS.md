@@ -1,43 +1,27 @@
-# cross-agent memory
+# mem: shared agent memory (spec)
 
-Shared memory for any agent (Claude, GPT, Grok, Gemini, human, …) that can read and write files in this repo.
-Truth lives in append-only logs under `mem/log/`. `mem/now.l` is a small snapshot derived from them.
-Read this file once, then `mem/now.l`. Nothing else is required.
+Truth = append-only logs mem/log/<handle>.<YYYY-MM>.l. Snapshot = mem/now.l, read it at session start; overflow in mem/rest.l. Logs win if they disagree.
 
-## 1. Start a session
-1. Read `mem/now.l` (agents, open tasks, live facts and decisions, unread messages, last records).
-2. If `now.l` is missing or stale (a log has lines with ts newer than its `upto=`), also read the lines from `upto` onward in `mem/log/*.<this-month>.l`. Logs win over the snapshot.
-3. Handle: 2–5 lowercase letters (`cl` claude, `gpt`, `gk` grok, `gm` gemini, `hu` human). Reuse yours from `#agents`. A second instance of the same vendor appends a letter (`clb`). Register once with an `A` record; refresh it when your verbs change.
-
-## 2. Write
-Append one line per record to your own file: `mem/log/<handle>.<YYYY-MM>.l` (create if missing).
-Never edit or delete existing lines. Never write another agent's file.
+Record = one line, 5 fields:
 
     ts|who|id|status|text
-    2026-09-29T14:02Z|cl|Tcl12|open|Add retry to fetcher ^Tcl9 >gpt #core
+    260929.1402|cl|Tcl12|open|Add retry to fetcher ^Tcl9 >gpt #core
 
-- `ts` UTC, minute precision. `who` your handle. No `|` or newline in text. Keep text under ~140 chars.
-- `id` = KIND + your handle + n. n = 1 + your highest n for that kind (`A` has no n: `Acl`).
-  The first line with an id creates it (text = title). Later lines with the same id, from anyone, patch it. Latest ts wins.
-- kinds: `A` agent · `T` task · `F` fact · `D` decision · `M` message.
-- status by kind. `-` = note only, no status change.
-  `A` on off · `T` open claim done ok redo block drop · `F`/`D` live old wrong · `M` new seen
-- sigils in text: `^ID` relates to · `!ID` supersedes (marks it old) · `>handle` assigned or addressed to · `#tag`.
+- ts YYMMDD.HHMM UTC. who = your handle, 2-5 lowercase letters (cl gpt gk gm hu; a 2nd running instance adds a letter: clb). text: no | or newline, max 200 chars.
+- id = KIND + handle + n, n = 1 + your highest n for that kind (A has no n: Acl). First line with an id creates it (text = title). Later lines with that id, from anyone, patch it. Latest ts wins.
+- kinds: A agent, T task, F fact (max 120 chars), D decision, M message
+- status: A on off. T open claim done ok redo block drop. F D live old wrong. M new seen. "-" = note only.
+- sigils in text: ^ID relates, !ID supersedes (marks it old), >handle assigned or addressed to, #tag
 
-## 3. Rules
-- Attribution: every line carries who and when. The snapshot shows the last actor per id.
-- Supersede, never delete: write the new fact with `!oldID`. History stays in the logs.
-- No self-approval: the handle that claimed or reported `done` cannot set `ok`. A different agent or the human reviews and patches `ok` or `redo`. `mem.py` ignores a self-ok and warns.
-- Hand off: patch the task to `open` with a note of where you stopped. Continue someone's task: patch it to `claim`.
-- Use each other's tools: `A` records list verbs (shell, git, pr, web, browser, python, pytest, deploy, …). Need a verb you lack? Open a `T` with `>handle` of an agent that has it and record the result as an `F`.
-- No secrets, ever: no API keys, tokens, cookies, passwords, `.env` contents. Advertise verbs, not credentials. `mem.py check` scans for common key shapes.
-- Code changes follow the project's normal flow (branch, PR, review). Memory records may go straight to the default branch: they are append-only and never conflict.
-- Concurrency: your file is yours, so two agents never overwrite each other. If a push is rejected, `git pull --rebase` (log files merge by union) or re-read the file's SHA via the API and append again. If `now.l` conflicts, keep either side and rebuild it.
-- Time: if you cannot read a clock, use the newest ts you can see plus one minute.
+Rules:
+- Start: read mem/now.l. Register once with an A line listing verbs you can run (shell git pr web browser python pytest deploy). Patch it when they change.
+- Append to your own file only. Never edit or delete a line. Never touch another handle's file.
+- Supersede, never delete: new F or D line with !oldID.
+- Review: after done, only a different handle than the claimer or doer may set ok or redo. Self-ok is ignored and flagged.
+- Hand off: patch the T to open with a note of where you stopped. Continue: patch it to claim. Need a verb you lack: open a T with >handle of an agent that has it.
+- No secrets, ever: keys, tokens, cookies, passwords, .env contents. Advertise verbs, not credentials.
+- Push rejected: git pull --rebase (logs union-merge) or re-read the file SHA via API and append again. now.l conflict: keep either side, rebuild.
+- No clock: newest ts you can see plus one minute.
 
-## 4. Snapshot and tools (optional, stdlib Python)
-- `python3 mem/mem.py snap` rebuilds `mem/now.l`. Run it after appending if you can. The GitHub Action in `.github/workflows/mem.yml` also rebuilds it on every push. If you cannot run anything, just append; the next agent or the Action rebuilds.
-- `python3 mem/mem.py add <handle> <KIND|ID> <status> "<text>"` mints the id, stamps the time, appends, and snaps.
-- `python3 mem/mem.py check` lints format, secrets, self-approvals, and dangling refs. `python3 mem/mem.py new` prints records newer than the snapshot.
-
-Live chat is optional. If two agents are online at once they exchange `M` records and re-read `now.l`; anything agreed elsewhere is written back here or it did not happen.
+Optional tools (python3 stdlib): mem/mem.py snap | check | new | add <handle> <KIND or ID> <status> "<text>". A GitHub Action rebuilds now.l on push, so appending alone is enough.
+Live chat is optional: exchange M lines and re-read now.l. Anything agreed elsewhere is written here or it did not happen.

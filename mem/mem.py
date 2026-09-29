@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """cross-agent memory tool. Python 3.8+, stdlib only. Format: see AGENTS.md.
 
-  mem.py snap                          rebuild mem/now.l from mem/log/*.l
+  mem.py snap                          rebuild mem/now.l (+ mem/rest.l overflow) from mem/log/*.l
   mem.py check                         lint logs; exit 1 on errors
   mem.py add WHO KIND|ID STATUS TEXT   append one record (mints id if KIND), then snap
   mem.py new                           print log lines at or after now.l upto= (may repeat a few)
@@ -16,8 +16,9 @@ from collections import namedtuple
 ROOT = os.path.dirname(os.path.abspath(__file__))
 LOG = os.path.join(ROOT, "log")
 NOW = os.path.join(ROOT, "now.l")
+REST = os.path.join(ROOT, "rest.l")
 
-TS = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}Z$")
+TS = re.compile(r"^\d{6}\.\d{4}$")  # YYMMDD.HHMM UTC
 WHO = re.compile(r"^[a-z]{2,5}$")
 ID = re.compile(r"^([ATFDM])([a-z]{2,5})(\d*)$")
 REF = re.compile(r"(?<![A-Za-z0-9])([\^!])([ATFDM][a-z]{2,5}\d*)\b")
@@ -32,6 +33,9 @@ STATUS = {
 DEFAULT = {"A": "on", "T": "open", "F": "live", "D": "live", "M": "new"}
 CLOSED = {"off", "ok", "drop", "old", "wrong", "seen"}
 TASK_ORDER = {"done": 0, "redo": 1, "block": 2, "claim": 3, "open": 4}
+CAP = {"A": 50, "T": 25, "F": 40, "D": 15, "M": 10}  # snapshot rows per kind; the rest go to rest.l
+MAXLEN = {"F": 120}
+MAXTEXT = 200
 SECRETS = [
     re.compile(p)
     for p in (
@@ -52,7 +56,11 @@ Rec = namedtuple("Rec", "ts who id status text file line")
 
 
 def utcnow():
-    return time.strftime("%Y-%m-%dT%H:%MZ", time.gmtime())
+    return time.strftime("%y%m%d.%H%M", time.gmtime())
+
+
+def month_of(ts):
+    return "20%s-%s" % (ts[:2], ts[2:4])
 
 
 def fmt(r):
@@ -78,7 +86,7 @@ def load():
                 ts, who, rid, status, text = parts
                 m = ID.match(rid)
                 if not TS.match(ts):
-                    errs.append("%s bad ts %r (want YYYY-MM-DDTHH:MMZ)" % (loc, ts))
+                    errs.append("%s bad ts %r (want YYMMDD.HHMM)" % (loc, ts))
                 elif not WHO.match(who):
                     errs.append("%s bad who %r (2-5 lowercase letters)" % (loc, who))
                 elif who != fwho:
@@ -87,6 +95,8 @@ def load():
                     errs.append("%s bad id %r (KIND+handle+n; A has no n)" % (loc, rid))
                 elif status != "-" and status not in STATUS[rid[0]]:
                     errs.append("%s bad status %r for %s (%s)" % (loc, status, rid[0], " ".join(STATUS[rid[0]])))
+                elif len(text) > MAXLEN.get(rid[0], MAXTEXT):
+                    errs.append("%s text %d chars, max %d for %s" % (loc, len(text), MAXLEN.get(rid[0], MAXTEXT), rid[0]))
                 else:
                     recs.append(Rec(ts, who, rid, status, text, fname, n))
                 for pat in SECRETS:
@@ -131,11 +141,9 @@ def fold(recs):
 
 
 def snapshot(recs, errs, st, warns):
+    """Return (now_text, rest_text). now.l holds live rows up to CAP per kind; overflow goes to rest.l.
+    Output is deterministic for a given set of logs, so the Action commits only on real change."""
     upto = max((r.ts for r in recs), default=utcnow())
-    out = ["#now %s upto=%s recs=%d ids=%d" % (utcnow(), upto, len(recs), len(st))]
-    out += ["#err " + e for e in errs]
-    out += ["#warn " + w for w in warns]
-    out.append("#fmt ts|who|id|status|title|note  (ts/who = last update; T done = awaiting review by another handle)")
     sections = (
         ("agents", "A", lambda e: e["status"] == "on"),
         ("tasks", "T", lambda e: e["status"] not in ("ok", "drop")),
@@ -143,26 +151,34 @@ def snapshot(recs, errs, st, warns):
         ("decisions", "D", lambda e: e["status"] == "live"),
         ("msgs", "M", lambda e: e["status"] == "new"),
     )
+    now, rest, nrest = [], [], 0
     for name, kind, keep in sections:
         rows = [e for e in st.values() if e["kind"] == kind and keep(e)]
         if kind == "T":
             rows.sort(key=lambda e: (TASK_ORDER.get(e["status"], 9), e["ts"]))
         else:
             rows.sort(key=lambda e: e["ts"], reverse=True)
-        out.append("#%s %d" % (name, len(rows)))
-        out += ["|".join((e["ts"], e["who"], e["id"], e["status"], e["title"], e["note"])) for e in rows]
-    tail = recs[-10:]
-    out.append("#recent %d" % len(tail))
-    out += [fmt(r) for r in tail]
-    return "\n".join(out) + "\n"
+        head, tail = rows[:CAP[kind]], rows[CAP[kind]:]
+        nrest += len(tail)
+        for out, part, note in ((now, head, " +%d in rest.l" % len(tail) if tail else ""), (rest, tail, "")):
+            out.append("#%s %d%s" % (name, len(part), note))
+            out += ["|".join((e["ts"], e["who"], e["id"], e["status"], e["title"], e["note"])) for e in part]
+    head = ["#now upto=%s recs=%d ids=%d rest=%d" % (upto, len(recs), len(st), nrest)]
+    head += ["#err " + e for e in errs]
+    head += ["#warn " + w for w in warns]
+    head.append("#k ts|who|id|status|title|note  ts=YYMMDD.HHMM utc, who=last actor, id=KIND+handle+n, "
+                "K: A agent T task F fact D decision M message, T done=awaiting review by another handle, rules AGENTS.md")
+    return "\n".join(head + now) + "\n", "\n".join(["#rest overflow of now.l, same format"] + rest) + "\n"
 
 
 def cmd_snap():
     recs, errs = load()
     st, warns = fold(recs)
-    text = snapshot(recs, errs, st, warns)
+    text, rest = snapshot(recs, errs, st, warns)
     with open(NOW, "w", encoding="utf-8") as fh:
         fh.write(text)
+    with open(REST, "w", encoding="utf-8") as fh:
+        fh.write(rest)
     print("wrote %s: %d recs, %d ids, %d err, %d warn" % (os.path.relpath(NOW), len(recs), len(st), len(errs), len(warns)))
     return 0
 
@@ -217,7 +233,9 @@ def cmd_add(who, kid, status, text):
         if pat.search(text):
             sys.exit("refusing: text looks like a secret (%s)" % pat.pattern[:24])
     os.makedirs(LOG, exist_ok=True)
-    path = os.path.join(LOG, "%s.%s.l" % (who, ts[:7]))
+    if len(text) > MAXLEN.get(kind, MAXTEXT):
+        sys.exit("text is %d chars, max %d for %s" % (len(text), MAXLEN.get(kind, MAXTEXT), kind))
+    path = os.path.join(LOG, "%s.%s.l" % (who, month_of(ts)))
     line = fmt(Rec(ts, who, rid, status, text, "", 0))
     with open(path, "a", encoding="utf-8") as fh:
         fh.write(line + "\n")

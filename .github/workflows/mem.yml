@@ -27,7 +27,7 @@ jobs:
         run: |
           git config user.name "mem-bot"
           git config user.email "mem-bot@users.noreply.github.com"
-          git add mem/now.l
+          git add mem/now.l mem/rest.l
           git diff --cached --quiet && exit 0
           git commit -m "mem: rebuild snapshot [skip ci]"
           for i in 1 2 3; do
@@ -35,7 +35,7 @@ jobs:
             git fetch origin "$GITHUB_REF_NAME"
             git reset --hard "origin/$GITHUB_REF_NAME"
             python3 mem/mem.py snap
-            git add mem/now.l
+            git add mem/now.l mem/rest.l
             git diff --cached --quiet && exit 0
             git commit -m "mem: rebuild snapshot [skip ci]"
           done

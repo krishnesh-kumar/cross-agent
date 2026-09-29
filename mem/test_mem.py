@@ -17,6 +17,7 @@ class MemTest(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         mem.LOG = os.path.join(self.tmp, "log")
         mem.NOW = os.path.join(self.tmp, "now.l")
+        mem.REST = os.path.join(self.tmp, "rest.l")
         os.makedirs(mem.LOG)
 
     def tearDown(self):
@@ -32,8 +33,8 @@ class MemTest(unittest.TestCase):
         return st, errs, warns
 
     def test_patch_latest_wins_across_files(self):
-        self.write("cl", ["2026-09-01T10:00Z|cl|Tcl1|open|Do thing"])
-        self.write("gpt", ["2026-09-01T11:00Z|gpt|Tcl1|claim|on it"])
+        self.write("cl", ["260901.1000|cl|Tcl1|open|Do thing"])
+        self.write("gpt", ["260901.1100|gpt|Tcl1|claim|on it"])
         st, errs, warns = self.state()
         self.assertEqual(errs, [])
         self.assertEqual(st["Tcl1"]["status"], "claim")
@@ -43,46 +44,62 @@ class MemTest(unittest.TestCase):
 
     def test_self_approval_ignored(self):
         self.write("cl", [
-            "2026-09-01T10:00Z|cl|Tcl1|open|Do thing",
-            "2026-09-01T11:00Z|cl|Tcl1|done|finished",
-            "2026-09-01T12:00Z|cl|Tcl1|ok|looks good to me",
+            "260901.1000|cl|Tcl1|open|Do thing",
+            "260901.1100|cl|Tcl1|done|finished",
+            "260901.1200|cl|Tcl1|ok|looks good to me",
         ])
         st, _, warns = self.state()
         self.assertEqual(st["Tcl1"]["status"], "done")
         self.assertTrue(any("self-approval" in w for w in warns))
-        self.write("gpt", ["2026-09-01T13:00Z|gpt|Tcl1|ok|verified"])
+        self.write("gpt", ["260901.1300|gpt|Tcl1|ok|verified"])
         st, _, _ = self.state()
         self.assertEqual(st["Tcl1"]["status"], "ok")
 
     def test_creator_may_approve_other_agents_work(self):
-        self.write("cl", ["2026-09-01T10:00Z|cl|Tcl1|open|Do thing"])
-        self.write("gpt", ["2026-09-01T11:00Z|gpt|Tcl1|done|did it"])
-        self.write("cl", ["2026-09-01T12:00Z|cl|Tcl1|ok|reviewed"])
+        self.write("cl", ["260901.1000|cl|Tcl1|open|Do thing"])
+        self.write("gpt", ["260901.1100|gpt|Tcl1|done|did it"])
+        self.write("cl", ["260901.1200|cl|Tcl1|ok|reviewed"])
         st, _, warns = self.state()
         self.assertEqual(st["Tcl1"]["status"], "ok")
         self.assertEqual(warns, [])
 
     def test_supersede_marks_old(self):
-        self.write("cl", ["2026-09-01T10:00Z|cl|Fcl1|live|timeout is 10s"])
-        self.write("gpt", ["2026-09-02T10:00Z|gpt|Fgpt1|live|timeout is 30s !Fcl1"])
+        self.write("cl", ["260901.1000|cl|Fcl1|live|timeout is 10s"])
+        self.write("gpt", ["260902.1000|gpt|Fgpt1|live|timeout is 30s !Fcl1"])
         st, _, warns = self.state()
         self.assertEqual(st["Fcl1"]["status"], "old")
         self.assertEqual(st["Fgpt1"]["status"], "live")
         self.assertEqual(warns, [])
-        snap = mem.snapshot(*mem.load(), *mem.fold(mem.load()[0]))
+        snap, _ = mem.snapshot(*mem.load(), *mem.fold(mem.load()[0]))
         self.assertIn("Fgpt1|live", snap)
         self.assertNotIn("Fcl1|old", snap)
 
     def test_format_errors(self):
         self.write("cl", [
-            "2026-09-01T10:00Z|gpt|Tgpt1|open|wrong file",
+            "260901.1000|gpt|Tgpt1|open|wrong file",
             "2026-09-01|cl|Tcl1|open|bad ts",
-            "2026-09-01T10:00Z|cl|Tcl2|bogus|bad status",
-            "2026-09-01T10:00Z|cl|Acl1|on|A with n",
-            "2026-09-01T10:00Z|cl|Fcl1|live|token=sk-abcdefghijklmnopqrstuvwxyz1234",
+            "260901.1000|cl|Tcl2|bogus|bad status",
+            "260901.1000|cl|Acl1|on|A with n",
+            "260901.1000|cl|Fcl1|live|token=sk-abcdefghijklmnopqrstuvwxyz1234",
+            "260901.1000|cl|Fcl2|live|" + "x" * 121,
         ])
         _, errs, _ = self.state()
-        self.assertEqual(len(errs), 5, errs)
+        self.assertEqual(len(errs), 6, errs)
+
+    def test_snapshot_caps_and_order(self):
+        lines = ["260901.%04d|cl|Tcl%d|open|task %d" % (i, i, i) for i in range(1, 31)]
+        lines += ["260902.0001|cl|Tcl30|done|finished", "260902.0002|cl|Tcl29|block|waiting on ^Tcl1"]
+        self.write("cl", lines)
+        recs, errs = mem.load()
+        now, rest = mem.snapshot(recs, errs, *mem.fold(recs))
+        rows = [l for l in now.splitlines() if l.startswith("2609")]
+        self.assertEqual(len(rows), 25)
+        self.assertIn("|Tcl30|done|", rows[0])
+        self.assertIn("|Tcl29|block|", rows[1])
+        self.assertIn("#tasks 25 +5 in rest.l", now)
+        self.assertEqual(len([l for l in rest.splitlines() if l.startswith("2609")]), 5)
+        self.assertIn("rest=5", now.splitlines()[0])
+        self.assertTrue(now.splitlines()[1].startswith("#k ts|who|id|status|title|note"))
 
     def test_add_mints_ids(self):
         mem.cmd_add("cl", "T", "open", "first")
@@ -94,6 +111,8 @@ class MemTest(unittest.TestCase):
         self.assertEqual(sorted(st), ["Acl", "Tcl1", "Tcl2"])
         self.assertEqual(st["Tcl2"]["status"], "claim")
         self.assertTrue(os.path.exists(mem.NOW))
+        self.assertTrue(os.path.exists(mem.REST))
+        self.assertTrue(os.listdir(mem.LOG)[0].endswith(".20" + mem.utcnow()[:2] + "-" + mem.utcnow()[2:4] + ".l"))
         with self.assertRaises(SystemExit):
             mem.cmd_add("cl", "F", "live", "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234")
 
