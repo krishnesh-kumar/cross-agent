@@ -1,0 +1,2 @@
+* text=auto eol=lf
+mem/log/*.l merge=union

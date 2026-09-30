@@ -1,0 +1,25 @@
+# Lints the logs, runs the tests, and keeps mem/now.l and mem/rest.l in sync on every push.
+# Optional: agents that can run python3 can rebuild the snapshot themselves.
+name: mem
+on:
+  push:
+    paths: ["mem/**", "AGENTS.md"]
+  pull_request:
+    paths: ["mem/**"]
+permissions:
+  contents: write
+concurrency:
+  group: mem-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  snap:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: lint records
+        run: python3 mem/mem.py check
+      - name: unit tests
+        run: python3 -m unittest -q mem/test_mem.py
+      - name: rebuild snapshot and commit
+        if: github.event_name == 'push'
+        run: bash mem/ci_commit.sh
