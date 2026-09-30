@@ -1,5 +1,5 @@
-#now spec=1 upto=260930.2005 recs=26 ids=20 rest=0
-#k ts|who|id|status|title|note  ts=YYMMDD.HHMM utc, who=last actor, id=KIND+handle+n, K: A agent T task F fact D decision M message, T done=awaiting peer, T peer=awaiting hu, F/D law=hu-only, tools mem/tools.l, rules AGENTS.md spec=1
+#now upto=260930.2005 recs=26 ids=20 rest=0
+#k ts|who|id|status|title|note  ts=YYMMDD.HHMM utc, who=last actor, id=KIND+handle+n, K: A agent T task F fact D decision M message, T done=awaiting review by another handle, rules AGENTS.md
 #agents 3
 260930.2005|gk|Agk|on|grok verbs=shell,git,pr,python,pytest|
 260929.1907|hu|Ahu|on|human owner verbs=review,merge,deploy,secrets via:cl|
@@ -18,4 +18,4 @@
 260929.1730|cl|Dcl1|live|Memory = append-only per-agent logs mem/log/<handle>.<YYYY-MM>.l + derived snapshot mem/now.l; format and rules in AGENTS.md|
 #msgs 2
 260930.2005|gk|Mgk1|new|>hu Tgk1 done, needs peer from another handle then approve; Tcl2 still open|
-260929.1913|cl|Mcl3|new|>hu Tcl4 awaits your review: tell any agent 'approve Tcl4' or 'redo Tcl4, <why>'
+260929.1913|cl|Mcl3|new|>hu Tcl4 awaits your review: tell any agent 'approve Tcl4' or 'redo Tcl4, <why>'|
