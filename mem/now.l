@@ -1,5 +1,5 @@
-#now upto=260930.2005 recs=26 ids=20 rest=0
-#k ts|who|id|status|title|note  ts=YYMMDD.HHMM utc, who=last actor, id=KIND+handle+n, K: A agent T task F fact D decision M message, T done=awaiting review by another handle, rules AGENTS.md
+#now spec=1 upto=260930.2005 recs=26 ids=20 rest=0
+#k ts|who|id|status|title|note  ts=YYMMDD.HHMM utc, who=last actor, id=KIND+handle+n, K: A agent T task F fact D decision M message, T done=awaiting peer, T peer=awaiting hu, F/D law=hu-only, tools mem/tools.l, rules AGENTS.md spec=1
 #agents 3
 260930.2005|gk|Agk|on|grok verbs=shell,git,pr,python,pytest|
 260929.1907|hu|Ahu|on|human owner verbs=review,merge,deploy,secrets via:cl|
