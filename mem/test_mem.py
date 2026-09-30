@@ -27,10 +27,10 @@ class MemTest(unittest.TestCase):
         with open(os.path.join(mem.LOG, who + ".2026-09.l"), "a", encoding="utf-8") as fh:
             fh.write("\n".join(lines) + "\n")
 
-    def state(self):
+    def state(self, now=None):
         recs, errs = mem.load()
-        st, warns = mem.fold(recs)
-        return st, errs, warns
+        st, warns, hard = mem.fold(recs, now=now)
+        return st, errs + hard, warns
 
     def test_patch_latest_wins_across_files(self):
         self.write("cl", ["260901.1000|cl|Tcl1|open|Do thing"])
@@ -52,16 +52,25 @@ class MemTest(unittest.TestCase):
         self.assertEqual(st["Tcl1"]["status"], "done")
         self.assertTrue(any("self-approval" in w for w in warns))
         self.write("gpt", ["260901.1300|gpt|Tcl1|ok|verified"])
-        st, _, _ = self.state()
-        self.assertEqual(st["Tcl1"]["status"], "ok")
+        st, _, warns = self.state()
+        self.assertEqual(st["Tcl1"]["status"], "peer")
+        self.assertTrue(any("stored as peer" in w for w in warns))
 
-    def test_creator_may_approve_other_agents_work(self):
+    def test_creator_peer_does_not_close(self):
         self.write("cl", ["260901.1000|cl|Tcl1|open|Do thing"])
         self.write("gpt", ["260901.1100|gpt|Tcl1|done|did it"])
         self.write("cl", ["260901.1200|cl|Tcl1|ok|reviewed"])
         st, _, warns = self.state()
+        self.assertEqual(st["Tcl1"]["status"], "peer")
+        self.assertTrue(any("stored as peer" in w for w in warns))
+
+    def test_only_hu_ok_closes(self):
+        self.write("cl", ["260901.1000|cl|Tcl1|done|did it"])
+        self.write("hu", ["260901.1300|hu|Tcl1|ok|via:gpt ship it"])
+        st, errs, _ = self.state()
+        self.assertEqual(errs, [])
         self.assertEqual(st["Tcl1"]["status"], "ok")
-        self.assertEqual(warns, [])
+        self.assertEqual(st["Tcl1"]["who"], "hu")
 
     def test_supersede_marks_old(self):
         self.write("cl", ["260901.1000|cl|Fcl1|live|timeout is 10s"])
@@ -70,7 +79,9 @@ class MemTest(unittest.TestCase):
         self.assertEqual(st["Fcl1"]["status"], "old")
         self.assertEqual(st["Fgpt1"]["status"], "live")
         self.assertEqual(warns, [])
-        snap, _ = mem.snapshot(*mem.load(), *mem.fold(mem.load()[0]))
+        recs, errs = mem.load()
+        st, w, hard = mem.fold(recs)
+        snap, _ = mem.snapshot(recs, errs + hard, st, w)
         self.assertIn("Fgpt1|live", snap)
         self.assertNotIn("Fcl1|old", snap)
 
@@ -98,15 +109,17 @@ class MemTest(unittest.TestCase):
         lines += ["260902.0001|cl|Tcl30|done|finished", "260902.0002|cl|Tcl29|block|waiting on ^Tcl1"]
         self.write("cl", lines)
         recs, errs = mem.load()
-        now, rest = mem.snapshot(recs, errs, *mem.fold(recs))
+        st, warns, hard = mem.fold(recs)
+        now, rest = mem.snapshot(recs, errs + hard, st, warns)
         rows = [l for l in now.splitlines() if l.startswith("2609")]
         self.assertEqual(len(rows), 25)
         self.assertIn("|Tcl30|done|", rows[0])
         self.assertIn("|Tcl29|block|", rows[1])
         self.assertIn("#tasks 25 +5 in rest.l", now)
         self.assertEqual(len([l for l in rest.splitlines() if l.startswith("2609")]), 5)
+        self.assertIn("spec=1", now.splitlines()[0])
         self.assertIn("rest=5", now.splitlines()[0])
-        self.assertTrue(now.splitlines()[1].startswith("#k ts|who|id|status|title|note"))
+        self.assertTrue(any(l.startswith("#k ts|who|id|status|title|note") for l in now.splitlines()))
 
     def test_add_mints_ids(self):
         mem.cmd_add("cl", "T", "open", "first")
@@ -131,7 +144,7 @@ class MemTest(unittest.TestCase):
             mem.cmd_review(*args)
 
     def test_review_records_human_decision_marked_via_agent(self):
-        self.write("cl", ["260901.1000|cl|Tcl1|done|did it", "260901.1001|cl|Tcl2|done|did more"])
+        self.write("cl", ["260901.1000|cl|Tcl1|done|did it", "260901.1001|cl|Tcl2|peer|peer reviewed"])
         self.review("cl", "Tcl1", "ok", "looks good | ship")
         self.review("gpt", "Tcl2", "redo", "tests missing")
         st, errs, warns = self.state()
@@ -150,6 +163,46 @@ class MemTest(unittest.TestCase):
                 self.review(*args)
         st, _, _ = self.state()
         self.assertEqual((st["Thu1"]["status"], st["Tcl1"]["status"], st["Tcl2"]["status"]), ("done", "open", "done"))
+
+    def test_law_only_hu_and_blocks_supersede(self):
+        self.write("hu", ["260901.1000|hu|Dhu1|law|Memory format is pipe lines #mem"])
+        self.write("cl", ["260901.1100|cl|Dhu1|old|agents should not unset law",
+                          "260901.1101|cl|Dcl1|live|new format json !Dhu1"])
+        st, errs, _ = self.state()
+        self.assertEqual(st["Dhu1"]["status"], "law")
+        self.assertTrue(any("law patch" in e for e in errs))
+        self.assertTrue(any("cannot supersede law" in e for e in errs))
+        with self.assertRaises(SystemExit):
+            mem.cmd_add("cl", "D", "law", "agent cannot mint law")
+
+    def test_conflict_same_tag(self):
+        self.write("cl", ["260901.1000|cl|Fcl1|live|timeout is 10s #timeout"])
+        self.write("gpt", ["260901.1100|gpt|Fgpt1|live|timeout is 30s #timeout"])
+        _, _, warns = self.state()
+        self.assertTrue(any("conflict #timeout" in w for w in warns))
+
+    def test_claim_lease_expires(self):
+        self.write("cl", ["260901.1000|cl|Tcl1|open|Do thing"])
+        self.write("gpt", ["260901.1100|gpt|Tcl1|claim|ttl=30m starting"])
+        st, _, warns = self.state(now="260901.1140")
+        self.assertEqual(st["Tcl1"]["status"], "open")
+        self.assertTrue(any("claim expired" in w for w in warns))
+        st, _, _ = self.state(now="260901.1120")
+        self.assertEqual(st["Tcl1"]["status"], "claim")
+
+    def test_double_claim_warns(self):
+        self.write("cl", ["260901.1000|cl|Tcl1|claim|ttl=90m mine"])
+        self.write("gpt", ["260901.1100|gpt|Tcl1|claim|ttl=90m also mine"])
+        st, _, warns = self.state(now="260901.1100")
+        self.assertEqual(st["Tcl1"]["owner"], "gpt")
+        self.assertTrue(any("double claim" in w for w in warns))
+
+    def test_fact_path_hint(self):
+        self.write("cl", ["260901.1000|cl|Fcl1|live|" + "nopath " + "x" * 80])
+        self.write("gpt", ["260901.1100|gpt|Fgpt1|live|" + "has file " + "x" * 70 + " see mem/notes/x.md"])
+        _, _, warns = self.state()
+        self.assertTrue(any("Fcl1 fact >80" in w for w in warns))
+        self.assertFalse(any("Fgpt1 fact" in w for w in warns))
 
 
 if __name__ == "__main__":
