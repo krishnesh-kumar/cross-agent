@@ -2,15 +2,19 @@
 
 A shared memory and collaboration layer for AI agents from different vendors (Claude, GPT, Grok, Gemini, and whatever comes next) working on one project. The memory is plain files in this repository, so any agent that can read and write repo files can join. No database, no vector store, no daemon, no vendor feature.
 
-Agents read **[AGENTS.md](AGENTS.md)** (the spec, ~600 tokens, auto-loaded by Claude Code, Codex, Gemini CLI and Cursor) and then **`mem/now.l`** (the snapshot). That is the whole onboarding. This README is for humans and is never loaded by agents.
+Agents read **[AGENTS.md](AGENTS.md)** (the spec, auto-loaded by Claude Code, Codex, Gemini CLI and Cursor) and then **`mem/now.l`** (the snapshot) and **`mem/tools.l`** (canonical commands). That is the whole onboarding. This README is for humans and is never loaded by agents.
+
+Current spec version: **1** (`spec=1` in the `now.l` header).
 
 ## Layout
 
 ```
 AGENTS.md                      spec: format + rules (the only markdown agents read)
-CLAUDE.md, GEMINI.md           one-line pointers to AGENTS.md
-mem/now.l                      snapshot: agents, open tasks, live facts/decisions, unread msgs (capped)
+CLAUDE.md, GEMINI.md, GROK.md, GPT.md
+                               one-line pointers to AGENTS.md
+mem/now.l                      snapshot: agents, open tasks, live/law facts/decisions, unread msgs (capped)
 mem/rest.l                     overflow beyond the snapshot caps, same format, read on demand
+mem/tools.l                    canonical commands; agents run these strings
 mem/log/<handle>.<YYYY-MM>.l   append-only truth, one file per agent per month
 mem/mem.py                     stdlib tool: snap | check | add | new | review
 mem/ci_commit.sh               CI: rebuild snapshot, commit, push with retry (refuses to run over unpushed work)
@@ -26,8 +30,9 @@ One line, five fields, pipe separated. Timestamp is `YYMMDD.HHMM` UTC.
 ```
 ts|who|id|status|text
 260929.1402|cl|Tcl12|open|Add retry to fetcher ^Tcl9 >gpt #core
-260929.1510|gpt|Tcl12|claim|starting; will reuse ^Fcl3
+260929.1510|gpt|Tcl12|claim|ttl=90m starting; will reuse ^Fcl3
 260929.1840|gpt|Tcl12|done|PR 14, tests green
+260929.1900|cl|Tcl12|peer|tests match
 260930.0805|hu|Tcl12|ok|merged
 ```
 
@@ -35,68 +40,68 @@ ts|who|id|status|text
 - Ids are `KIND + handle + n`, so they are minted without coordination and never collide across agents.
 - Kinds: `A` agent, `T` task, `F` fact, `D` decision, `M` message. Sigils: `^` relates, `!` supersedes, `>` assigned to, `#` tag.
 - Status changes are new lines. Nothing is edited or deleted. History is the log; state is the fold.
+- `law` on an `F` or `D` is kernel state: only `hu` may set or unset it.
+- Non-human `ok` on a task is stored as `peer`. Only `hu ok` closes the task.
 
 ## Design decisions and why
 
 Measured with the GPT tokenizer as a proxy; Claude and Gemini differ slightly but the ranking holds.
 
-- **Per-agent append-only logs, one derived snapshot.** The only shape that satisfies "cheap updates", "small session start", "append-or-patch history" and "no silent overwrite" at once. Alternatives fail one each: markdown memory files get rewritten per change, a single shared log conflicts on concurrent pushes, git-backed trackers like Beads need a binary installed.
-- **Pipe-separated positional lines.** Same four records cost 114 tokens as pipe lines, 127 as markdown, 128 as TOON, 168 as JSONL. Keys and headers are pure overhead when every record has the same five fields.
-- **Timestamp `YYMMDD.HHMM`.** `2026-09-29T14:02Z` is 11 tokens, a third of a typical line. `260929.1402` is 5. Keeping the two-digit year costs nothing extra and keeps lines safe to copy across years. Minute precision stays because "latest line wins" across agents needs it.
-- **Word statuses, not letters.** `open`, `claim`, `done`, `ok` are one token each, same as `o`, `c`, `d`, `k`. Letters save nothing and cost clarity.
-- **Terse spec, separate README.** AGENTS.md is loaded every session and sits at the start of context unchanged, which is what prompt caching rewards. Explanations live here instead.
-- **Self-describing, capped snapshot.** Line two of `now.l` is the field key, so an agent that reads only that file can parse it. Caps per kind (25 tasks, 40 facts, 15 decisions, 10 messages, 50 agents) keep it bounded; overflow goes to `rest.l`. Fixed caps rather than a token budget because predictable is easier for a model to reason about.
-- **Tasks sorted by what needs action.** Awaiting review, then rejected, blocked, claimed, open. Zero extra tokens, just ordering.
-- **Facts capped at 120 characters, enforced by lint.** Facts are the part of memory that grows forever. A fact that needs more room should be a file in the repo with the fact pointing at its path.
-- **Python stdlib plus a GitHub Action.** Python is on every GitHub runner and most machines. The Action means an agent with no shell still gets a fresh snapshot. Neither is required to participate; appending a line is full membership.
+- **Per-agent append-only logs, one derived snapshot.** The only shape that satisfies "cheap updates", "small session start", "append-or-patch history" and "no silent overwrite" at once.
+- **Pipe-separated positional lines.** Same four records cost 114 tokens as pipe lines, 127 as markdown, 128 as TOON, 168 as JSONL.
+- **Timestamp `YYMMDD.HHMM`.** Minute precision stays because "latest line wins" across agents needs it.
+- **Terse spec, separate README.** AGENTS.md is loaded every session. Explanations live here instead.
+- **Self-describing, capped snapshot.** Caps per kind keep `now.l` bounded; overflow goes to `rest.l`.
+- **Tasks sorted by what needs action.** Awaiting peer, then peer (awaiting hu), rejected, blocked, claimed, open.
+- **Facts capped at 120 characters.** Facts over 80 characters without a repo path are warned.
+- **Shared tools file, not shared brains.** Models will not think the same. They can be forced to run the same commands and to treat some records as uneditable.
+- **Enforcement in the fold, not only in the spec.** `law`, coerced agent-`ok` to `peer`, expired claims, tag conflicts, and secret shapes fail or warn in `mem.py check`.
 
-Not done on purpose: no archiving of old logs into digests (logs are never read at session start, so size costs nothing until someone investigates history), no live chat channel (an `M` line plus a re-read covers two agents online together), no vendor-specific capture hooks (they would tie the design to each harness).
+Not done on purpose: no log digests, no live chat bus, no vendor hooks, no cryptographic human identity (`via:` stays an honesty rule).
 
 ## How the constraints are met
 
 | Constraint | Mechanism |
 | --- | --- |
-| GitHub is the host, nothing else required | Plain text files. The Action and `mem.py` are conveniences, not dependencies. |
-| Any agent joins with file read/write | Append a line to your own file. Read one snapshot file. |
-| Async by default, live chat optional | `M` records addressed with `>handle`. Agents online together re-read `now.l`. |
-| Lightweight onboarding | `AGENTS.md` fits in one read. Five kinds, one line format, four sigils. |
-| Low-token updates | A change is one appended line, about 20 tokens. Nothing is rewritten by hand. |
-| No markdown for living memory | Logs and snapshot are dense pipe lines. Markdown is only the spec. |
-| Session start loads a snapshot | `now.l` holds only live state, capped per kind. Closed and superseded items drop out. |
-| Append-or-patch history | Patches are new lines. `!oldID` supersedes; the old line stays in the log, marked `old` in the fold. |
-| Every record attributed | `ts` and `who` on every line. Snapshot shows the last actor and the current status. |
-| No self-approval | `ok` from the handle that claimed or reported `done` is ignored and flagged by `mem.py`. The human reviews by telling any agent in chat, and the agent records it as `hu` marked `via:<agent>`. |
-| No secrets | Rule in the spec. `mem.py check` and the Action reject common key shapes. `A` records advertise verbs, not credentials. |
-| Same-day writes never overwrite | One log file per agent. Git union-merge on logs. API writers get a SHA conflict instead of a silent overwrite. |
+| GitHub is the host | Plain text files. Action and `mem.py` are conveniences. |
+| Any agent joins with file read/write | Append a line to your own file. Read `now.l`. |
+| No self-approval | Self-ok ignored. Non-hu `ok` becomes `peer`. Only `hu ok` closes. |
+| Kernel law | `law` on F/D. Only `hu` may set or unset. Agent patches and `!` are errors. |
+| Same-page conflicts | Two live/law F or D sharing a `#tag` without `!` are warned. |
+| Claim leases | `ttl=` / `until=` on claim. Expired claims return to `open`. |
+| Shared syscalls | `mem/tools.l` is the command table. |
+| No secrets | `mem.py check` rejects common key shapes. |
+| Concurrent appends | One log file per agent. `merge=union` on logs. |
 
 ## Running it
 
 ```
-python3 mem/mem.py check                                  # lint
-python3 mem/mem.py snap                                   # rebuild mem/now.l and mem/rest.l
-python3 mem/mem.py add gpt T open "Wire the retry loop"   # append + snap
-python3 mem/mem.py new                                    # what changed since the snapshot
+python3 mem/mem.py check
+python3 mem/mem.py snap
+python3 mem/mem.py add gpt T open "Wire the retry loop"
+python3 mem/mem.py new
 python3 -m unittest mem/test_mem.py
 ```
 
-An agent with no shell appends the line by hand (via the GitHub API or a file edit) and the Action rebuilds the snapshot on push.
+An agent with no shell appends the line by hand and the Action rebuilds the snapshot on push.
 
 ## Human review
 
-You never touch GitHub or a log file. You talk to whichever agent you are already working with:
+You talk to whichever agent you are already working with:
 
 ```
 approve Tcl4
 redo Tcl4, the retry test is missing
+make Dcl1 law
 ```
 
-The agent runs `python3 mem/mem.py review <its handle> Tcl4 ok "note"`, or appends the same line by hand if it has no shell. The record is written under your handle `hu` with the text starting `via:<agent>`, for example `260930.0805|hu|Tcl4|ok|via:gpt looks good`. The tool refuses if the task does not exist, is not `done`, or was done by you.
+The agent runs `python3 mem/mem.py review <its handle> Tcl4 ok "note"`, or appends the same line by hand. Allowed on `done` or `peer`. To lock a fact or decision, tell an agent to record `hu|<id>|law|...`.
 
-To join as the human, tell an agent "register me". It appends an `A` line for `hu` with your verbs.
+To join as the human, tell an agent "register me".
 
 ### What this does and does not guarantee
 
-- The `via:` tag says which agent relayed your decision, so the log shows who claimed you said it. Nothing cryptographic backs it. The check is that the agent honestly reports what you said.
-- An agent must never review on your behalf from its own judgement. The spec says so, and the tool cannot enforce it.
-- The rule still stops the common failure. An agent cannot approve work it did itself as an agent. Only a decision attributed to `hu` closes a task, and every such decision names the agent that vouched for it.
-- If you later want proof rather than trust, the option is signed commits from your own key, or a GitHub approval. Both add steps for you, so they are left out on purpose.
+- `via:` names the agent that claimed you said it. Nothing cryptographic backs it.
+- An agent must never review on your behalf from its own judgement. The tool cannot enforce that.
+- Agents cannot unset `law`. They can still ignore `AGENTS.md` and never run `check`. CI is the enforcement that exists today.
+- Signed commits or GitHub approvals would be real proof. They add steps for you, so they are left out on purpose.
