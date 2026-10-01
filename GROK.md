@@ -1,1 +1,1 @@
-Not required. Official Grok loads AGENTS.md (and CLAUDE.md). Read AGENTS.md, then mem/now.l.
+Pointer. Official Grok loads AGENTS.md. A community Grok CLI reads this name. Read AGENTS.md, then mem/now.l.

@@ -5,7 +5,7 @@
   mem.py check                         lint logs; exit 1 on format errors only
   mem.py add WHO KIND|ID STATUS TEXT   append one record (mints id if KIND), then snap
   mem.py new                           print log lines at or after now.l upto= (may repeat a few)
-  mem.py review VIA ID ok|redo [NOTE]  record the human's chat decision on a done/peer task as hu
+  mem.py review VIA ID ok|redo [NOTE]  record the human's chat decision as hu, text starts via:VIA
 """
 import glob
 import os
@@ -22,15 +22,20 @@ REST = os.path.join(ROOT, "rest.l")
 HUMAN = "hu"
 SPEC = 1
 DEFAULT_TTL_MIN = 90
+OUTLIER_MIN = 26 * 60  # a lone ts this far ahead of the rest is a typo, not the clock
 
-TS = re.compile(r"^\d{6}\.\d{4}$")
+TS = re.compile(r"^\d{6}\.\d{4}$")  # YYMMDD.HHMM UTC
 WHO = re.compile(r"^[a-z]{2,5}$")
 ID = re.compile(r"^([ATFDM])([a-z]{2,5})(\d*)$")
 REF = re.compile(r"(?<![A-Za-z0-9])([\^!])([ATFDM][a-z]{2,5}\d*)\b")
 TAG = re.compile(r"(?<![A-Za-z0-9])#([a-z0-9_-]+)\b")
 TTL = re.compile(r"\bttl=(\d+)m\b")
 UNTIL = re.compile(r"\buntil=(\d{6}\.\d{4})\b")
-PATHISH = re.compile(r"see\s+((?:[\w.-]+/)+[\w.-]+|[\w.-]+\.(?:md|py|txt|l))\b")
+# A slash path counts even without "see". "see file.md" counts. Node.js does not.
+PATHISH = re.compile(
+    r"(?:[\w.-]+/)+[\w.-]+|see\s+[\w.-]+\.(?:md|py|txt|l)\b",
+    re.I,
+)
 KINDS = "ATFDM"
 STATUS = {
     "A": ("on", "off"),
@@ -77,27 +82,74 @@ def fmt(r):
     return "|".join((r.ts, r.who, r.id, r.status, r.text))
 
 
+def valid_ts(ts):
+    """Digit shape is not enough: 31 February matches the pattern and must not crash."""
+    if not TS.match(ts or ""):
+        return False
+    try:
+        datetime.strptime("20" + ts, "%Y%m%d.%H%M")
+        return True
+    except ValueError:
+        return False
+
+
 def ts_add_minutes(ts, minutes):
     dt = datetime.strptime("20" + ts, "%Y%m%d.%H%M") + timedelta(minutes=int(minutes))
     return dt.strftime("%y%m%d.%H%M")
 
 
 def claim_until(ts, text):
+    """Lease end, or None if the timestamp cannot be parsed. Never raises."""
+    if not valid_ts(ts):
+        return None
     m = UNTIL.search(text or "")
-    if m:
+    if m and valid_ts(m.group(1)):
         return m.group(1)
     m = TTL.search(text or "")
     minutes = int(m.group(1)) if m else DEFAULT_TTL_MIN
-    return ts_add_minutes(ts, minutes)
+    try:
+        return ts_add_minutes(ts, minutes)
+    except ValueError:
+        return None
 
 
-def same_writer(a, b):
-    """cl and clb are the same running identity. Not cryptographic."""
-    return a == b or a.startswith(b) or b.startswith(a)
+def same_writer(a, b, registered=None):
+    """cl and an unregistered clb are the same running identity. Not cryptographic.
+
+    A one-letter suffix counts only when the longer handle has no A line of its own.
+    gp and gpt are different agents once both are registered.
+    """
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    short, long = (a, b) if len(a) < len(b) else (b, a)
+    if len(long) != len(short) + 1 or not long.startswith(short):
+        return False
+    if registered and short in registered and long in registered:
+        return False
+    return True
+
+
+def pick_now(recs):
+    """Latest real log ts. A lone timestamp more than a day ahead of the rest is a typo."""
+    ts = sorted({r.ts for r in recs if valid_ts(r.ts)})
+    if not ts:
+        return utcnow(), None
+    if len(ts) >= 2:
+        try:
+            if ts_add_minutes(ts[-2], OUTLIER_MIN) < ts[-1]:
+                return ts[-2], ts[-1]
+        except ValueError:
+            return ts[-2], ts[-1]
+    return ts[-1], None
 
 
 def load():
-    """Parse every log file. Returns (records sorted by ts, errors)."""
+    """Parse every log file. Returns (records sorted by ts, errors).
+
+    Format errors are excluded from the fold. Policy misses are not errors.
+    """
     recs, errs = [], []
     for path in sorted(glob.glob(os.path.join(LOG, "*.l"))):
         fname = os.path.basename(path)
@@ -114,8 +166,8 @@ def load():
                     continue
                 ts, who, rid, status, text = parts
                 m = ID.match(rid)
-                if not TS.match(ts):
-                    errs.append("%s bad ts %r (want YYMMDD.HHMM)" % (loc, ts))
+                if not TS.match(ts) or not valid_ts(ts):
+                    errs.append("%s bad ts %r (want a real YYMMDD.HHMM)" % (loc, ts))
                 elif not WHO.match(who):
                     errs.append("%s bad who %r (2-5 lowercase letters)" % (loc, who))
                 elif who != fwho:
@@ -137,18 +189,24 @@ def load():
 
 
 def fold(recs, now=None):
-    """Replay records. now defaults to the latest log ts so a snap is deterministic.
+    """Replay records. now defaults to the latest log ts, ignoring a lone future typo.
 
     Policy misses (law, self-ok, peer-before-done) are warnings. The fold ignores them.
     They are not errors: an append-only log cannot delete the bad line, and check must
-    not stay red forever.
+    not stay red forever. Format errors never reach here.
     """
+    outlier = None
     if now is None:
-        now = max((r.ts for r in recs), default=utcnow())
+        now, outlier = pick_now(recs)
     st, warns = {}, []
+    if outlier:
+        warns.append("ignored future ts %s; clock stays %s" % (outlier, now))
+    registered = {r.who for r in recs if r.id == "A" + r.who}
     known = {r.id for r in recs}
     for r in recs:
         kind = r.id[0]
+        if valid_ts(r.ts) and month_of(r.ts) not in r.file:
+            warns.append("%s ts %s is not in file %s" % (r.id, r.ts, r.file))
         e = st.get(r.id)
         if e is None:
             status = r.status if r.status != "-" else DEFAULT[kind]
@@ -182,7 +240,7 @@ def fold(recs, now=None):
                 if e.get("status") != "done":
                     warns.append("%s %s ignored, task is %s not done (%s:%d)" % (r.id, s, e.get("status"), r.file, r.line))
                     s = "-"
-                elif same_writer(r.who, e.get("owner") or "") or (s == "peer" and r.who == HUMAN):
+                elif same_writer(r.who, e.get("owner") or "", registered):
                     warns.append("%s self-approval by %s ignored (%s:%d)" % (r.id, r.who, r.file, r.line))
                     s = "-"
             if s == "law" and r.who != HUMAN:
@@ -190,6 +248,8 @@ def fold(recs, now=None):
                 s = "-"
             if kind == "T" and s == "claim":
                 e["until"] = claim_until(r.ts, r.text)
+            if kind == "T" and s == "-" and e.get("status") == "claim" and r.who == e.get("owner"):
+                e["until"] = claim_until(r.ts, r.text) or e.get("until")
             if kind == "T" and s == "peer":
                 e["peer"] = r.who
             if s != "-":
@@ -205,9 +265,9 @@ def fold(recs, now=None):
                     warns.append("%s refers to unknown %s (%s:%d)" % (r.id, tgt, r.file, r.line))
             elif sigil == "!" and tgt != r.id:
                 if t.get("status") == "law" and r.who != HUMAN:
-                    warns.append("%s cannot supersede law %s; marked wrong (%s:%d)" % (r.id, tgt, r.file, r.line))
+                    warns.append("%s cannot supersede law %s (%s:%d)" % (r.id, tgt, r.file, r.line))
                     cur = st.get(r.id)
-                    if cur and cur.get("status") not in CLOSED:
+                    if cur and cur["kind"] in "FD" and cur.get("status") not in CLOSED:
                         cur["status"] = "wrong"
                         cur["note"] = "refused supersede of law " + tgt
                 elif t["status"] not in CLOSED:
@@ -234,7 +294,8 @@ def fold(recs, now=None):
 
 
 def snapshot(recs, errs, st, warns):
-    upto = max((r.ts for r in recs), default=utcnow())
+    """Render the capped live view. Law rows stay ahead of live rows so they are last to overflow."""
+    upto = max((r.ts for r in recs if valid_ts(r.ts)), default=utcnow())
     sections = (
         ("agents", "A", lambda e: e["status"] == "on"),
         ("tasks", "T", lambda e: e["status"] not in ("ok", "drop")),
@@ -248,7 +309,8 @@ def snapshot(recs, errs, st, warns):
         if kind == "T":
             rows.sort(key=lambda e: (TASK_ORDER.get(e["status"], 9), e["ts"]))
         elif kind in "FD":
-            rows.sort(key=lambda e: (0 if e["status"] == "law" else 1, e["ts"]), reverse=True)
+            rows.sort(key=lambda e: e["ts"], reverse=True)
+            rows.sort(key=lambda e: 0 if e["status"] == "law" else 1)
         else:
             rows.sort(key=lambda e: e["ts"], reverse=True)
         head, tail = rows[:CAP[kind]], rows[CAP[kind]:]
@@ -302,6 +364,7 @@ def cmd_new():
 
 
 def _append(who, kid, status, text):
+    """Validate, mint an id if needed, append one line. Exits with a message on bad input."""
     if not WHO.match(who):
         sys.exit("bad handle %r: 2-5 lowercase letters" % who)
     if "|" in text or "\n" in text:
@@ -344,6 +407,7 @@ def cmd_add(who, kid, status, text):
 
 
 def cmd_review(via, rid, verdict, note=""):
+    """Write the human's chat decision as an hu line marked via:<agent>. Refuses bad requests."""
     if verdict not in ("ok", "redo"):
         sys.exit("verdict must be ok or redo")
     if not WHO.match(via) or via == HUMAN:
