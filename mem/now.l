@@ -1,5 +1,7 @@
 #now spec=1 upto=261001.0706 recs=28 ids=21 rest=0
-#k ts|who|id|status|title|note  ts=YYMMDD.HHMM utc, who=last actor, id=KIND+handle+n, K: A agent T task F fact D decision M message, T done=awaiting peer, T peer=awaiting hu, F/D law=hu-only, tools mem/tools.l, rules AGENTS.md spec=1
+#warn Fcl1 fact >80 chars with no repo path
+#warn Fgk2 fact >80 chars with no repo path
+#k ts|who|id|status|title|note  ts=YYMMDD.HHMM utc, who=last actor, id=KIND+handle+n, K: A agent T task F fact D decision M message, T done=awaiting a different handle or hu, law=hu file only, rules AGENTS.md spec=1
 #agents 3
 260930.2005|gk|Agk|on|grok verbs=shell,git,pr,python,pytest|
 260929.1907|hu|Ahu|on|human owner verbs=review,merge,deploy,secrets via:cl|
