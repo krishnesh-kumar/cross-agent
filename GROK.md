@@ -1,1 +1,1 @@
-Read AGENTS.md first, then mem/now.l and mem/tools.l. Memory rules and record format live there.
+Not required. Official Grok loads AGENTS.md (and CLAUDE.md). Read AGENTS.md, then mem/now.l.

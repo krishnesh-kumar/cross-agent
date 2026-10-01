@@ -1,1 +1,1 @@
-Read AGENTS.md first, then mem/now.l and mem/tools.l. Memory rules and record format live there.
+Not auto-loaded. Codex reads AGENTS.md. Read AGENTS.md, then mem/now.l.
