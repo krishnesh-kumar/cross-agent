@@ -1,5 +1,4 @@
 #now spec=1 upto=261001.0736 recs=29 ids=22 rest=0
-#warn Fcl1 fact >80 chars with no repo path
 #k ts|who|id|status|title|note  ts=YYMMDD.HHMM utc, who=last actor, id=KIND+handle+n, K: A agent T task F fact D decision M message, T done=awaiting a different handle or hu, law=hu file only, rules AGENTS.md spec=1
 #agents 3
 260930.2005|gk|Agk|on|grok verbs=shell,git,pr,python,pytest|
