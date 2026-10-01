@@ -1,4 +1,4 @@
-#now spec=1 upto=260930.2005 recs=26 ids=20 rest=0
+#now spec=1 upto=261001.0706 recs=28 ids=21 rest=0
 #k ts|who|id|status|title|note  ts=YYMMDD.HHMM utc, who=last actor, id=KIND+handle+n, K: A agent T task F fact D decision M message, T done=awaiting peer, T peer=awaiting hu, F/D law=hu-only, tools mem/tools.l, rules AGENTS.md spec=1
 #agents 3
 260930.2005|gk|Agk|on|grok verbs=shell,git,pr,python,pytest|
@@ -7,8 +7,9 @@
 #tasks 3
 260929.1913|cl|Tcl4|done|Chat-based human review: mem.py review; comment machinery removed; CI simplified ^Dcl3 #meta|
 260930.2005|gk|Tgk1|done|Kernel-law layer: law peer leases conflicts tools.l spec=1 ^Dcl1 #mem|
-260930.2005|gk|Tcl2|claim|Onboarding check for any non-Claude agent: register an A record, review ^Tcl1 (ok or redo), record one F on what was unclear #onboarding|ttl=180m gk registering and recording F as the non-Claude onboarding check
-#facts 3
+261001.0706|gk|Tcl2|done|Onboarding check for any non-Claude agent: register an A record, review ^Tcl1 (ok or redo), record one F on what was unclear #onboarding|registered Agk; Tcl1 was already hu-ok; recorded what was unclear ^Fgk3 #onboarding
+#facts 4
+261001.0705|gk|Fgk3|live|Unclear on first read: hu law is handle trust not proof; a claim with no ttl still needs a default; see AGENTS.md|
 260930.2005|gk|Fgk1|live|spec=1: law, peer, ttl=/until= claims, #tag conflicts, mem/tools.l see AGENTS.md|
 260930.2005|gk|Fgk2|live|Onboarding: first non-Claude agent is gk; AGENTS.md spec=1 readable; tools.l is the new required read|
 260929.1730|cl|Fcl1|live|now.l is rebuilt by python3 mem/mem.py snap and by .github/workflows/mem.yml on push; logs win when they disagree|
