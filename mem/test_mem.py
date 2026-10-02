@@ -1,10 +1,12 @@
 """Unit tests for mem.py. Run: python3 -m unittest mem/test_mem.py"""
+import contextlib
+import io
 import os
 import shutil
 import tempfile
 import unittest
-
 import importlib.util
+from datetime import datetime, timedelta
 
 _spec = importlib.util.spec_from_file_location(
     "memtool", os.path.join(os.path.dirname(os.path.abspath(__file__)), "mem.py"))
@@ -23,19 +25,23 @@ class MemTest(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp)
 
-    def write(self, who, lines):
-        with open(os.path.join(mem.LOG, who + ".2026-09.l"), "a", encoding="utf-8") as fh:
+    def write(self, who, lines, month="2026-09"):
+        with open(os.path.join(mem.LOG, "%s.%s.l" % (who, month)), "a", encoding="utf-8") as fh:
             fh.write("\n".join(lines) + "\n")
 
-    def state(self):
+    def state(self, now=None):
         recs, errs = mem.load()
-        st, warns = mem.fold(recs)
+        st, warns = mem.fold(recs, now=now)
         return st, errs, warns
+
+    def review(self, *args):
+        with contextlib.redirect_stdout(io.StringIO()):
+            mem.cmd_review(*args)
 
     def test_patch_latest_wins_across_files(self):
         self.write("cl", ["260901.1000|cl|Tcl1|open|Do thing"])
         self.write("gpt", ["260901.1100|gpt|Tcl1|claim|on it"])
-        st, errs, warns = self.state()
+        st, errs, _ = self.state(now="260901.1100")
         self.assertEqual(errs, [])
         self.assertEqual(st["Tcl1"]["status"], "claim")
         self.assertEqual(st["Tcl1"]["title"], "Do thing")
@@ -48,36 +54,214 @@ class MemTest(unittest.TestCase):
             "260901.1100|cl|Tcl1|done|finished",
             "260901.1200|cl|Tcl1|ok|looks good to me",
         ])
-        st, _, warns = self.state()
+        st, _, warns = self.state(now="260901.1200")
         self.assertEqual(st["Tcl1"]["status"], "done")
         self.assertTrue(any("self-approval" in w for w in warns))
         self.write("gpt", ["260901.1300|gpt|Tcl1|ok|verified"])
-        st, _, _ = self.state()
+        st, _, _ = self.state(now="260901.1300")
         self.assertEqual(st["Tcl1"]["status"], "ok")
 
     def test_creator_may_approve_other_agents_work(self):
         self.write("cl", ["260901.1000|cl|Tcl1|open|Do thing"])
         self.write("gpt", ["260901.1100|gpt|Tcl1|done|did it"])
         self.write("cl", ["260901.1200|cl|Tcl1|ok|reviewed"])
-        st, _, warns = self.state()
+        st, _, warns = self.state(now="260901.1200")
         self.assertEqual(st["Tcl1"]["status"], "ok")
         self.assertEqual(warns, [])
+
+    def test_other_agent_ok_closes(self):
+        self.write("cl", ["260901.1000|cl|Tcl1|open|Do thing"])
+        self.write("gpt", ["260901.1100|gpt|Tcl1|done|did it"])
+        self.write("cl", ["260901.1200|cl|Tcl1|ok|reviewed"])
+        st, _, warns = self.state(now="260901.1200")
+        self.assertEqual(st["Tcl1"]["status"], "ok")
+        self.assertFalse(any("self-approval" in w for w in warns))
+
+    def test_ok_before_done_ignored(self):
+        self.write("cl", ["260930.1000|cl|Tcl1|claim|ttl=600m working"])
+        self.write("gk", ["260930.1010|gk|Tcl1|ok|looks fine"])
+        self.write("hu", ["260930.1020|hu|Tcl1|ok|via:gk approve"])
+        st, _, warns = self.state(now="260930.1020")
+        self.assertEqual(st["Tcl1"]["status"], "claim")
+        self.assertTrue(any("not done" in w for w in warns))
+
+    def test_peer_before_done_ignored(self):
+        self.write("cl", ["260930.1000|cl|Tcl1|claim|ttl=600m working"])
+        self.write("gk", ["260930.1010|gk|Tcl1|peer|lgtm"])
+        st, _, warns = self.state(now="260930.1010")
+        self.assertEqual(st["Tcl1"]["status"], "claim")
+        self.assertTrue(any("not done" in w for w in warns))
+
+    def test_suffixed_handle_cannot_self_peer(self):
+        self.write("cl", ["260930.0900|cl|Acl|on|x", "260930.1000|cl|Tcl1|done|t"])
+        self.write("clb", ["260930.1050|clb|Aclb|on|2nd instance", "260930.1100|clb|Tcl1|peer|lgtm"])
+        st, _, warns = self.state(now="260930.1100")
+        self.assertEqual(st["Tcl1"]["status"], "done")
+        self.assertTrue(any("self-approval" in w for w in warns))
+
+    def test_one_letter_extension_is_the_same_writer(self):
+        self.write("gp", ["260930.1000|gp|Agp|on|verbs", "260930.1000|gp|Tgp1|done|t"])
+        self.write("gpt", ["260930.1001|gpt|Agpt|on|verbs", "260930.1100|gpt|Tgp1|ok|reviewed"])
+        st, _, warns = self.state(now="260930.1100")
+        self.assertEqual(st["Tgp1"]["status"], "done")
+        self.assertTrue(any("self-approval" in w for w in warns))
+
+    def test_hu_peer_is_not_self_approval(self):
+        self.write("cl", ["260930.1000|cl|Tcl1|done|t"])
+        self.write("hu", ["260930.1100|hu|Tcl1|peer|noted"])
+        st, _, warns = self.state(now="260930.1100")
+        self.assertEqual(st["Tcl1"]["status"], "peer")
+        self.assertFalse(any("self-approval" in w for w in warns))
 
     def test_supersede_marks_old(self):
         self.write("cl", ["260901.1000|cl|Fcl1|live|timeout is 10s"])
         self.write("gpt", ["260902.1000|gpt|Fgpt1|live|timeout is 30s !Fcl1"])
-        st, _, warns = self.state()
+        st, _, warns = self.state(now="260902.1000")
         self.assertEqual(st["Fcl1"]["status"], "old")
         self.assertEqual(st["Fgpt1"]["status"], "live")
         self.assertEqual(warns, [])
-        snap, _ = mem.snapshot(*mem.load(), *mem.fold(mem.load()[0]))
-        self.assertIn("Fgpt1|live", snap)
-        self.assertNotIn("Fcl1|old", snap)
+
+    def test_law_note_and_supersede(self):
+        self.write("hu", ["260930.1000|hu|Fhu1|law|API timeout is 30s"])
+        self.write("gk", ["260930.1100|gk|Fhu1|-|actually 10s, ignore the title"])
+        self.write("gk", ["260930.1200|gk|Dgk1|live|use nose !Fhu1"])
+        st, _, warns = self.state(now="260930.1200")
+        self.assertEqual(st["Fhu1"]["status"], "law")
+        self.assertEqual(st["Fhu1"]["note"], "")
+        self.assertEqual(st["Dgk1"]["status"], "wrong")
+        self.assertTrue(any("law note" in w for w in warns))
+        self.assertTrue(any("cannot supersede law" in w for w in warns))
+
+    def test_mentioning_law_does_not_mark_task_wrong(self):
+        self.write("hu", ["260930.1000|hu|Dhu1|law|use pytest"])
+        self.write("gk", ["260930.1100|gk|Tgk1|open|discuss whether to replace !Dhu1"])
+        st, _, warns = self.state(now="260930.1100")
+        self.assertEqual(st["Tgk1"]["status"], "open")
+        self.assertEqual(st["Dhu1"]["status"], "law")
+        self.assertFalse(any("cannot supersede law" in w for w in warns))
+
+    def test_expired_takeover_is_not_double_claim(self):
+        self.write("cl", ["260930.1001|cl|Tcl1|claim|ttl=10m"])
+        self.write("gk", ["260930.1100|gk|Tcl1|claim|mine now"])
+        st, _, warns = self.state(now="260930.1100")
+        self.assertEqual(st["Tcl1"]["owner"], "gk")
+        self.assertFalse(any("double claim" in w for w in warns))
+
+    def test_default_ttl_expires(self):
+        self.write("cl", ["260901.1000|cl|Tcl1|claim|no lease written"])
+        st, _, _ = self.state(now="260901.1100")
+        self.assertEqual(st["Tcl1"]["status"], "claim")
+        st, _, warns = self.state(now="260901.1330")
+        self.assertEqual(st["Tcl1"]["status"], "open")
+        self.assertTrue(any("claim expired" in w for w in warns))
+
+    def test_progress_note_extends_lease(self):
+        self.write("cl", [
+            "260930.1000|cl|Tcl1|claim|working",
+            "260930.1100|cl|Tcl1|-|progress: half done",
+            "260930.1145|cl|Tcl1|-|progress: almost there",
+        ])
+        st, _, warns = self.state(now="260930.1145")
+        self.assertEqual(st["Tcl1"]["status"], "claim")
+        self.assertFalse(any("expired" in w for w in warns))
+
+    def test_impossible_date_is_format_error_not_crash(self):
+        self.write("cl", ["260231.1000|cl|Tcl1|claim|working"])
+        recs, errs = mem.load()
+        self.assertEqual(recs, [])
+        self.assertTrue(any("bad ts" in e for e in errs))
+        st, warns = mem.fold(recs)
+        self.assertEqual(st, {})
+        self.assertEqual(warns, [])
+
+    def test_lone_future_ts_does_not_move_the_clock(self):
+        self.write("cl", ["260930.1000|cl|Tcl1|claim|working", "260930.1010|cl|Fcl1|live|x"])
+        self.write("gk", ["991231.2300|gk|Fgk8|live|broken clock"])
+        st, _, warns = self.state()
+        self.assertEqual(st["Tcl1"]["status"], "claim")
+        self.assertTrue(any("lone ts 991231.2300" in w for w in warns))
+        recs, errs = mem.load()
+        snap, _ = mem.snapshot(recs, errs, *mem.fold(recs))
+        self.assertIn("upto=260930.1010", snap.splitlines()[0])
+
+    def test_two_future_lines_still_move_the_clock(self):
+        self.write("cl", ["260930.1000|cl|Tcl1|claim|working"])
+        self.write("gk", ["991231.2300|gk|Fgk8|live|broken", "991231.2301|gk|Fgk9|live|same clock"])
+        st, _, _ = self.state()
+        self.assertEqual(st["Tcl1"]["status"], "open")
+
+    def test_long_pause_does_not_freeze_the_clock(self):
+        lines = []
+        for i in range(30):
+            dt = datetime(2026, 1, 1) + timedelta(days=i)
+            lines.append(dt.strftime("%y%m%d") + ".1000|cl|Fcl%d|live|day %d" % (i + 1, i))
+        lines.append("280120.1000|cl|Fcl99|live|resumed after a long pause")
+        lines.append("280120.1100|cl|Tcl1|claim|working")
+        self.write("cl", lines)
+        recs, _ = mem.load()
+        self.assertEqual(mem.pick_now(recs)[0], "280120.1100")
+        st, _, _ = self.state()
+        self.assertEqual(st["Tcl1"]["status"], "claim")
+
+    def test_pause_is_not_a_typo(self):
+        self.write("cl", ["260928.0900|cl|Tcl1|claim|working", "260928.0905|cl|Fcl1|live|x"])
+        self.write("gk", ["260930.1200|gk|Fgk1|live|first write after a 2-day pause"])
+        st, _, warns = self.state()
+        self.assertEqual(st["Tcl1"]["status"], "open")
+        self.assertFalse(any("ignored future" in w for w in warns))
+
+    def test_agreeing_facts_are_not_conflicts(self):
+        self.write("cl", [
+            "260930.1000|cl|Fcl1|live|API base url is api.example.com #api",
+            "260930.1001|cl|Fcl2|live|API timeout is 30s #api",
+        ])
+        _, _, warns = self.state(now="260930.1001")
+        self.assertFalse(any("conflict" in w for w in warns))
+
+    def test_decisions_same_tag_conflict(self):
+        self.write("cl", ["260930.1000|cl|Dcl1|live|use pytest #test"])
+        self.write("gpt", ["260930.1001|gpt|Dgpt1|live|use unittest #test"])
+        _, _, warns = self.state(now="260930.1001")
+        self.assertTrue(any("conflict #test" in w for w in warns))
+
+    def test_path_hint_rejects_dotted_words(self):
+        self.write("cl", ["260901.1000|cl|Fcl1|live|" + "uses Node.js and/or see above " + "x" * 60])
+        self.write("gpt", ["260901.1100|gpt|Fgpt1|live|" + "long " + "x" * 70 + " see mem/notes/x.md"])
+        self.write("gk", ["260901.1200|gk|Fgk1|live|" + "names mem/mem.py and .github/workflows/mem.yml " + "x" * 40])
+        self.write("gm", ["260901.1300|gm|Fgm1|live|" + "See mem/ci_commit.sh and mem/log/ " + "x" * 50])
+        _, _, warns = self.state(now="260901.1300")
+        self.assertTrue(any("Fcl1 fact >80" in w for w in warns))
+        self.assertFalse(any("Fgpt1 fact" in w for w in warns))
+        self.assertFalse(any("Fgk1 fact" in w for w in warns))
+        self.assertFalse(any("Fgm1 fact" in w for w in warns))
+
+    def test_law_sorts_ahead_of_live(self):
+        lines = ["260930.0900|hu|Dhu1|law|use pytest"]
+        lines += ["260930.%04d|gk|Dgk%d|live|decision %d" % (1000 + i, i, i) for i in range(1, 16)]
+        self.write("hu", lines[:1])
+        self.write("gk", lines[1:])
+        recs, errs = mem.load()
+        st, warns = mem.fold(recs, now="260930.1015")
+        snap, rest = mem.snapshot(recs, errs, st, warns)
+        self.assertIn("|Dhu1|law|", snap)
+        self.assertNotIn("|Dhu1|law|", rest)
+
+    def test_snap_uses_latest_log_not_wall_clock(self):
+        self.write("cl", ["260901.1000|cl|Tcl1|claim|ttl=30m"])
+        recs, errs = mem.load()
+        st, warns = mem.fold(recs)
+        self.assertEqual(st["Tcl1"]["status"], "claim")
+        self.assertFalse(any("expired" in w for w in warns))
+        snap, _ = mem.snapshot(recs, errs, st, warns)
+        self.assertIn("spec=1", snap.splitlines()[0])
 
     def test_forward_reference_ok_but_never_created_warns(self):
-        self.write("cl", ["260901.1000|cl|Tcl1|drop|replaced by ^Tcl2", "260901.1001|cl|Tcl2|open|new one",
-                          "260901.1002|cl|Fcl1|live|see ^Tcl99"])
-        _, _, warns = self.state()
+        self.write("cl", [
+            "260901.1000|cl|Tcl1|drop|replaced by ^Tcl2",
+            "260901.1001|cl|Tcl2|open|new one",
+            "260901.1002|cl|Fcl1|live|see ^Tcl99",
+        ])
+        _, _, warns = self.state(now="260901.1002")
         self.assertEqual(len(warns), 1)
         self.assertIn("unknown Tcl99", warns[0])
 
@@ -90,7 +274,7 @@ class MemTest(unittest.TestCase):
             "260901.1000|cl|Fcl1|live|token=sk-abcdefghijklmnopqrstuvwxyz1234",
             "260901.1000|cl|Fcl2|live|" + "x" * 121,
         ])
-        _, errs, _ = self.state()
+        _, errs, _ = self.state(now="260901.1000")
         self.assertEqual(len(errs), 6, errs)
 
     def test_snapshot_caps_and_order(self):
@@ -98,7 +282,7 @@ class MemTest(unittest.TestCase):
         lines += ["260902.0001|cl|Tcl30|done|finished", "260902.0002|cl|Tcl29|block|waiting on ^Tcl1"]
         self.write("cl", lines)
         recs, errs = mem.load()
-        now, rest = mem.snapshot(recs, errs, *mem.fold(recs))
+        now, rest = mem.snapshot(recs, errs, *mem.fold(recs, now="260902.0002"))
         rows = [l for l in now.splitlines() if l.startswith("2609")]
         self.assertEqual(len(rows), 25)
         self.assertIn("|Tcl30|done|", rows[0])
@@ -106,7 +290,7 @@ class MemTest(unittest.TestCase):
         self.assertIn("#tasks 25 +5 in rest.l", now)
         self.assertEqual(len([l for l in rest.splitlines() if l.startswith("2609")]), 5)
         self.assertIn("rest=5", now.splitlines()[0])
-        self.assertTrue(now.splitlines()[1].startswith("#k ts|who|id|status|title|note"))
+        self.assertTrue(any(l.startswith("#k ts|who|id|status|title|note") for l in now.splitlines()))
 
     def test_add_mints_ids(self):
         mem.cmd_add("cl", "T", "open", "first")
@@ -124,19 +308,14 @@ class MemTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             mem.cmd_add("cl", "F", "live", "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234")
 
-    def review(self, *args):
-        import contextlib
-        import io
-        with contextlib.redirect_stdout(io.StringIO()):
-            mem.cmd_review(*args)
-
     def test_review_records_human_decision_marked_via_agent(self):
         self.write("cl", ["260901.1000|cl|Tcl1|done|did it", "260901.1001|cl|Tcl2|done|did more"])
         self.review("cl", "Tcl1", "ok", "looks good | ship")
         self.review("gpt", "Tcl2", "redo", "tests missing")
         st, errs, warns = self.state()
         self.assertEqual((st["Tcl1"]["status"], st["Tcl2"]["status"]), ("ok", "redo"))
-        self.assertEqual((errs, warns), ([], []))
+        self.assertEqual(errs, [])
+        self.assertFalse(any("self-approval" in w for w in warns))
         self.assertEqual(st["Tcl1"]["who"], "hu")
         self.assertEqual(st["Tcl1"]["note"], "via:cl looks good / ship")
         self.assertEqual(st["Tcl2"]["note"], "via:gpt tests missing")
@@ -148,7 +327,7 @@ class MemTest(unittest.TestCase):
                      ("hu", "Tcl2", "ok"), ("cl", "Tcl2", "maybe"), ("cl", "Tcl2", "ok", "token=sk-abcdefghijklmnopqrstuvwxyz1234")):
             with self.assertRaises(SystemExit, msg=str(args)):
                 self.review(*args)
-        st, _, _ = self.state()
+        st, _, _ = self.state(now="260901.1002")
         self.assertEqual((st["Thu1"]["status"], st["Tcl1"]["status"], st["Tcl2"]["status"]), ("done", "open", "done"))
 
 

@@ -2,42 +2,55 @@
 """cross-agent memory tool. Python 3.8+, stdlib only. Format: see AGENTS.md.
 
   mem.py snap                          rebuild mem/now.l (+ mem/rest.l overflow) from mem/log/*.l
-  mem.py check                         lint logs; exit 1 on errors
+  mem.py check                         lint logs; exit 1 on format errors only
   mem.py add WHO KIND|ID STATUS TEXT   append one record (mints id if KIND), then snap
   mem.py new                           print log lines at or after now.l upto= (may repeat a few)
-  mem.py review VIA ID ok|redo [NOTE]  record the human's chat decision on a done task as hu, marked via:VIA
+  mem.py review VIA ID ok|redo [NOTE]  record the human's chat decision as hu, text starts via:VIA
 """
 import glob
 import os
 import re
 import sys
 import time
-from collections import namedtuple
+from collections import defaultdict, namedtuple
+from datetime import datetime, timedelta
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 LOG = os.path.join(ROOT, "log")
 NOW = os.path.join(ROOT, "now.l")
 REST = os.path.join(ROOT, "rest.l")
 HUMAN = "hu"
+SPEC = 1
+DEFAULT_TTL_MIN = 90
+LONE_JUMP = timedelta(days=7)
 
 TS = re.compile(r"^\d{6}\.\d{4}$")  # YYMMDD.HHMM UTC
 WHO = re.compile(r"^[a-z]{2,5}$")
 ID = re.compile(r"^([ATFDM])([a-z]{2,5})(\d*)$")
 REF = re.compile(r"(?<![A-Za-z0-9])([\^!])([ATFDM][a-z]{2,5}\d*)\b")
+TAG = re.compile(r"(?<![A-Za-z0-9])#([a-z0-9_-]+)\b")
+TTL = re.compile(r"\bttl=(\d+)m\b")
+UNTIL = re.compile(r"\buntil=(\d{6}\.\d{4})\b")
+# see path/file counts. A slash path with a dot counts. "see above" and and/or do not.
+PATHISH = re.compile(
+    r"see\s+[\w.-]*/[\w./-]+|(?:[\w.-]+/)+[\w.-]*\.[\w.-]+",
+    re.I,
+)
 KINDS = "ATFDM"
 STATUS = {
     "A": ("on", "off"),
-    "T": ("open", "claim", "done", "ok", "redo", "block", "drop"),
-    "F": ("live", "old", "wrong"),
-    "D": ("live", "old", "wrong"),
+    "T": ("open", "claim", "done", "peer", "ok", "redo", "block", "drop"),
+    "F": ("live", "law", "old", "wrong"),
+    "D": ("live", "law", "old", "wrong"),
     "M": ("new", "seen"),
 }
 DEFAULT = {"A": "on", "T": "open", "F": "live", "D": "live", "M": "new"}
 CLOSED = {"off", "ok", "drop", "old", "wrong", "seen"}
-TASK_ORDER = {"done": 0, "redo": 1, "block": 2, "claim": 3, "open": 4}
-CAP = {"A": 50, "T": 25, "F": 40, "D": 15, "M": 10}  # snapshot rows per kind; the rest go to rest.l
+TASK_ORDER = {"done": 0, "peer": 1, "redo": 2, "block": 3, "claim": 4, "open": 5}
+CAP = {"A": 50, "T": 25, "F": 40, "D": 15, "M": 10}
 MAXLEN = {"F": 120}
 MAXTEXT = 200
+FACT_PATH_HINT = 80
 SECRETS = [
     re.compile(p)
     for p in (
@@ -69,8 +82,90 @@ def fmt(r):
     return "|".join((r.ts, r.who, r.id, r.status, r.text))
 
 
+def valid_ts(ts):
+    """Digit shape is not enough: 31 February matches the pattern and must not crash."""
+    if not TS.match(ts or ""):
+        return False
+    try:
+        datetime.strptime("20" + ts, "%Y%m%d.%H%M")
+        return True
+    except ValueError:
+        return False
+
+
+def as_dt(ts):
+    return datetime.strptime("20" + ts, "%Y%m%d.%H%M")
+
+
+def ts_add_minutes(ts, minutes):
+    """Add minutes. A result past 2099 stays as a string that still sorts after 2099."""
+    dt = as_dt(ts) + timedelta(minutes=int(minutes))
+    if dt.year >= 2100:
+        return "999999.9999"
+    return dt.strftime("%y%m%d.%H%M")
+
+
+def ts_before(a, b):
+    """Order by real date, so a wrapped two-digit year cannot sort earlier."""
+    if a == "999999.9999":
+        return False
+    if b == "999999.9999":
+        return True
+    return as_dt(a) < as_dt(b)
+
+
+def claim_until(ts, text):
+    """Lease end, or None if the timestamp cannot be parsed. Never raises."""
+    if not valid_ts(ts):
+        return None
+    m = UNTIL.search(text or "")
+    if m and valid_ts(m.group(1)):
+        return m.group(1)
+    m = TTL.search(text or "")
+    minutes = int(m.group(1)) if m else DEFAULT_TTL_MIN
+    try:
+        return ts_add_minutes(ts, minutes)
+    except ValueError:
+        return None
+
+
+def same_writer(a, b, registered=None):
+    """cl and clb are the same running identity, even if clb registered. Not cryptographic.
+
+    A one-letter suffix always counts. Do not pick a handle that is another handle plus one letter.
+    registered is unused; kept so callers do not change.
+    """
+    del registered
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    short, long = (a, b) if len(a) < len(b) else (b, a)
+    return len(long) == len(short) + 1 and long.startswith(short)
+
+
+def pick_now(recs):
+    """Latest valid timestamp. A lone jump more than 7 days ahead is not the clock.
+
+    One far-future line does not expire every claim or hide later records from `new`.
+    Two lines within 7 days of each other still move the clock: the fold cannot tell
+    them from a project resumed after a pause. Returns (clock, lone record or None).
+    """
+    good = [r for r in recs if valid_ts(r.ts)]
+    if not good:
+        return utcnow(), None
+    ordered = sorted(good, key=lambda r: as_dt(r.ts))
+    latest = ordered[-1]
+    if len(ordered) >= 2 and as_dt(latest.ts) - as_dt(ordered[-2].ts) > LONE_JUMP:
+        return ordered[-2].ts, latest
+    return latest.ts, None
+
+
 def load():
-    """Parse every log file. Returns (records sorted by ts, errors)."""
+    """Parse every log file. Returns (records sorted by ts, errors).
+
+    Format errors are excluded from the fold. Policy misses are not errors.
+    """
     recs, errs = [], []
     for path in sorted(glob.glob(os.path.join(LOG, "*.l"))):
         fname = os.path.basename(path)
@@ -87,8 +182,8 @@ def load():
                     continue
                 ts, who, rid, status, text = parts
                 m = ID.match(rid)
-                if not TS.match(ts):
-                    errs.append("%s bad ts %r (want YYMMDD.HHMM)" % (loc, ts))
+                if not TS.match(ts) or not valid_ts(ts):
+                    errs.append("%s bad ts %r (want a real YYMMDD.HHMM)" % (loc, ts))
                 elif not WHO.match(who):
                     errs.append("%s bad who %r (2-5 lowercase letters)" % (loc, who))
                 elif who != fwho:
@@ -109,50 +204,119 @@ def load():
     return recs, errs
 
 
-def fold(recs):
-    """Replay records into current state: {id: entry}. Returns (state, warnings)."""
+def fold(recs, now=None):
+    """Replay records. now defaults to the latest log timestamp.
+
+    A lone timestamp more than 7 days ahead of the rest is warned and not used as the clock.
+    Policy misses are warnings. Format errors never reach here.
+    """
+    lone = None
+    if now is None:
+        now, lone = pick_now(recs)
     st, warns = {}, []
-    known = {r.id for r in recs}  # a reference to an id created later is fine, only never-created ids warn
+    if lone:
+        warns.append("lone ts %s is more than 7d ahead of the clock %s (%s:%d); not used" % (lone.ts, now, lone.file, lone.line))
+    registered = {r.who for r in recs if r.id == "A" + r.who}
+    known = {r.id for r in recs}
     for r in recs:
         kind = r.id[0]
+        if valid_ts(r.ts) and month_of(r.ts) not in r.file:
+            warns.append("%s ts %s is not in file %s" % (r.id, r.ts, r.file))
         e = st.get(r.id)
         if e is None:
+            status = r.status if r.status != "-" else DEFAULT[kind]
+            if status == "law" and r.who != HUMAN:
+                warns.append("%s law set by %s ignored (%s:%d)" % (r.id, r.who, r.file, r.line))
+                status = DEFAULT[kind]
+            if kind == "T" and status in ("ok", "peer"):
+                warns.append("%s %s ignored, task was not done (%s:%d)" % (r.id, status, r.file, r.line))
+                status = "open"
             e = st[r.id] = dict(
                 id=r.id, kind=kind, by=r.who, ts0=r.ts, title=r.text, note="",
-                who=r.who, ts=r.ts, owner=r.who,
-                status=r.status if r.status != "-" else DEFAULT[kind],
+                who=r.who, ts=r.ts, owner=r.who, status=status,
+                until=claim_until(r.ts, r.text) if kind == "T" and status == "claim" else None,
+                peer=r.who if status == "peer" else "",
             )
         else:
             s = r.status
+            note = r.text
+            if e.get("status") == "law" and r.who != HUMAN:
+                warns.append("%s law note/status by %s ignored (%s:%d)" % (r.id, r.who, r.file, r.line))
+                s, note = "-", ""
+            if kind == "T" and s == "claim" and e.get("status") == "claim" and e.get("owner") and e["owner"] != r.who:
+                until = e.get("until")
+                if until and until <= r.ts:
+                    pass
+                else:
+                    warns.append("%s double claim by %s and %s (%s:%d)" % (r.id, e["owner"], r.who, r.file, r.line))
             if kind == "T" and s in ("claim", "done"):
                 e["owner"] = r.who
-            if kind == "T" and s == "ok" and r.who == e["owner"]:
-                warns.append("%s self-approval by %s ignored (%s:%d)" % (r.id, r.who, r.file, r.line))
+            if kind == "T" and s in ("ok", "peer"):
+                if e.get("status") != "done":
+                    warns.append("%s %s ignored, task is %s not done (%s:%d)" % (r.id, s, e.get("status"), r.file, r.line))
+                    s = "-"
+                elif same_writer(r.who, e.get("owner") or "", registered):
+                    warns.append("%s self-approval by %s ignored (%s:%d)" % (r.id, r.who, r.file, r.line))
+                    s = "-"
+            if s == "law" and r.who != HUMAN:
+                warns.append("%s law set by %s ignored (%s:%d)" % (r.id, r.who, r.file, r.line))
                 s = "-"
+            if kind == "T" and s == "claim":
+                e["until"] = claim_until(r.ts, r.text)
+            if kind == "T" and s == "-" and e.get("status") == "claim" and r.who == e.get("owner"):
+                e["until"] = claim_until(r.ts, r.text) or e.get("until")
+            if kind == "T" and s == "peer":
+                e["peer"] = r.who
             if s != "-":
                 e["status"] = s
-            if r.text:
-                e["note"] = r.text
-            e["who"], e["ts"] = r.who, r.ts
+            if note:
+                e["note"] = note
+            if s != "-" or note:
+                e["who"], e["ts"] = r.who, r.ts
         for sigil, tgt in REF.findall(r.text):
             t = st.get(tgt)
             if t is None:
                 if tgt not in known:
                     warns.append("%s refers to unknown %s (%s:%d)" % (r.id, tgt, r.file, r.line))
-            elif sigil == "!" and tgt != r.id and t["status"] not in CLOSED:
-                t.update(status="old", who=r.who, ts=r.ts, note="superseded by " + r.id)
+            elif sigil == "!" and tgt != r.id:
+                if t.get("status") == "law" and r.who != HUMAN:
+                    cur = st.get(r.id)
+                    if cur and cur["kind"] in "FD":
+                        warns.append("%s cannot supersede law %s (%s:%d)" % (r.id, tgt, r.file, r.line))
+                        if cur.get("status") not in CLOSED:
+                            cur["status"] = "wrong"
+                            cur["note"] = "refused supersede of law " + tgt
+                elif t["status"] not in CLOSED:
+                    t.update(status="old", who=r.who, ts=r.ts, note="superseded by " + r.id)
+    for e in st.values():
+        if e["kind"] == "T" and e["status"] == "claim" and e.get("until") and not ts_before(now, e["until"]):
+            warns.append("%s claim expired at %s, back to open" % (e["id"], e["until"]))
+            e["status"] = "open"
+            e["note"] = ((e.get("note") or "") + " claim expired").strip()
+        if e["kind"] == "F" and e["status"] in ("live", "law"):
+            blob = (e.get("title") or "") + " " + (e.get("note") or "")
+            if len(e.get("title") or "") > FACT_PATH_HINT and not PATHISH.search(blob):
+                warns.append("%s fact >%d chars with no repo path" % (e["id"], FACT_PATH_HINT))
+    by_tag = defaultdict(list)
+    for e in st.values():
+        if e["kind"] == "D" and e["status"] in ("live", "law"):
+            for tag in set(TAG.findall((e.get("title") or "") + " " + (e.get("note") or ""))):
+                by_tag[tag].append(e["id"])
+    for tag, ids in sorted(by_tag.items()):
+        uniq = sorted(set(ids))
+        if len(uniq) > 1:
+            warns.append("conflict #%s: %s" % (tag, " ".join(uniq)))
     return st, warns
 
 
 def snapshot(recs, errs, st, warns):
-    """Return (now_text, rest_text). now.l holds live rows up to CAP per kind; overflow goes to rest.l.
-    Output is deterministic for a given set of logs, so the Action commits only on real change."""
-    upto = max((r.ts for r in recs), default=utcnow())
+    """Render the capped live view. Law rows stay ahead of live rows so they are last to overflow."""
+    upto, _ = pick_now(recs)
     sections = (
         ("agents", "A", lambda e: e["status"] == "on"),
         ("tasks", "T", lambda e: e["status"] not in ("ok", "drop")),
-        ("facts", "F", lambda e: e["status"] == "live"),
-        ("decisions", "D", lambda e: e["status"] == "live"),
+        ("facts", "F", lambda e: e["status"] in ("live", "law")),
+        ("decisions", "D", lambda e: e["status"] in ("live", "law")),
         ("msgs", "M", lambda e: e["status"] == "new"),
     )
     now, rest, nrest = [], [], 0
@@ -160,6 +324,9 @@ def snapshot(recs, errs, st, warns):
         rows = [e for e in st.values() if e["kind"] == kind and keep(e)]
         if kind == "T":
             rows.sort(key=lambda e: (TASK_ORDER.get(e["status"], 9), e["ts"]))
+        elif kind in "FD":
+            rows.sort(key=lambda e: e["ts"], reverse=True)
+            rows.sort(key=lambda e: 0 if e["status"] == "law" else 1)
         else:
             rows.sort(key=lambda e: e["ts"], reverse=True)
         head, tail = rows[:CAP[kind]], rows[CAP[kind]:]
@@ -167,11 +334,12 @@ def snapshot(recs, errs, st, warns):
         for out, part, note in ((now, head, " +%d in rest.l" % len(tail) if tail else ""), (rest, tail, "")):
             out.append("#%s %d%s" % (name, len(part), note))
             out += ["|".join((e["ts"], e["who"], e["id"], e["status"], e["title"], e["note"])) for e in part]
-    head = ["#now upto=%s recs=%d ids=%d rest=%d" % (upto, len(recs), len(st), nrest)]
+    head = ["#now spec=%d upto=%s recs=%d ids=%d rest=%d" % (SPEC, upto, len(recs), len(st), nrest)]
     head += ["#err " + e for e in errs]
     head += ["#warn " + w for w in warns]
     head.append("#k ts|who|id|status|title|note  ts=YYMMDD.HHMM utc, who=last actor, id=KIND+handle+n, "
-                "K: A agent T task F fact D decision M message, T done=awaiting review by another handle, rules AGENTS.md")
+                "K: A agent T task F fact D decision M message, "
+                "T done=awaiting a different handle or hu, law=hu file only, rules AGENTS.md spec=%d" % SPEC)
     return "\n".join(head + now) + "\n", "\n".join(["#rest overflow of now.l, same format"] + rest) + "\n"
 
 
@@ -212,7 +380,7 @@ def cmd_new():
 
 
 def _append(who, kid, status, text):
-    """Validate and append one record to who's log for this month. Returns the line. Exits with a message on bad input."""
+    """Validate, mint an id if needed, append one line. Exits with a message on bad input."""
     if not WHO.match(who):
         sys.exit("bad handle %r: 2-5 lowercase letters" % who)
     if "|" in text or "\n" in text:
@@ -233,6 +401,8 @@ def _append(who, kid, status, text):
     kind = rid[0]
     if status != "-" and status not in STATUS[kind]:
         sys.exit("bad status %r for %s: %s or -" % (status, kind, " ".join(STATUS[kind])))
+    if status == "law" and who != HUMAN:
+        sys.exit("only a line in hu's file may set law; that is not proof the human wrote it")
     ts = utcnow()
     for pat in SECRETS:
         if pat.search(text):
@@ -253,7 +423,7 @@ def cmd_add(who, kid, status, text):
 
 
 def cmd_review(via, rid, verdict, note=""):
-    """The human decided in chat and told agent `via` to record it. Writes an hu line marked via:<agent>."""
+    """Write the human's chat decision as an hu line marked via:<agent>. Refuses bad requests."""
     if verdict not in ("ok", "redo"):
         sys.exit("verdict must be ok or redo")
     if not WHO.match(via) or via == HUMAN:
@@ -262,8 +432,8 @@ def cmd_review(via, rid, verdict, note=""):
     e = fold(recs)[0].get(rid)
     if e is None or e["kind"] != "T":
         sys.exit("no such task: %s" % rid)
-    if e["status"] != "done":
-        sys.exit("%s is %s, only a done task can be reviewed" % (rid, e["status"]))
+    if e["status"] not in ("done", "peer"):
+        sys.exit("%s is %s, only a done or peer task can be reviewed" % (rid, e["status"]))
     if e["owner"] == HUMAN:
         sys.exit("%s was done by the human, a different handle must review it" % rid)
     text = " ".join(("via:" + via + " " + note).replace("|", "/").split())
