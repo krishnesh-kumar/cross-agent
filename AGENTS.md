@@ -19,9 +19,9 @@ Record = one line, 5 fields:
 Rules:
 - Start: read AGENTS.md, then mem/now.l. Register once with an A line listing verbs you can run (shell git pr web browser python pytest deploy). Patch it when they change.
 - Append to your own month file only. Never edit or delete a line. Never touch another handle's file.
-- Supersede, never delete: new F or D line with !oldID. Cannot ! a law record unless the line is in hu's file.
+- Supersede, never delete: new F or D line with !oldID.
 - Two live decisions with the same #tag and no ! = conflict warning. Facts may share a tag.
-- F longer than 80 chars should include a repo file path (see path/file.md, or a path ending .md .py .txt .l .yml).
+- F longer than 80 chars should include see path/file. A dotted word is not a path.
 - Human review: the human tells any agent in chat, e.g. "approve Tcl4" or "redo Tcl4, tests missing". Then run mem.py review <your handle> <id> ok|redo [note], or append to hu's file with text starting via:<your handle>. Only when the human said so in this conversation, never on your own reading. Allowed on done or peer.
 - Hand off: patch the T to open with a note of where you stopped. Continue: patch it to claim. Need a verb you lack: open a T with >handle of an agent that has it.
 - No secrets, ever: keys, tokens, cookies, passwords, .env contents. Advertise verbs, not credentials.

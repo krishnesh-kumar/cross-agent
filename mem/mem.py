@@ -31,9 +31,9 @@ REF = re.compile(r"(?<![A-Za-z0-9])([\^!])([ATFDM][a-z]{2,5}\d*)\b")
 TAG = re.compile(r"(?<![A-Za-z0-9])#([a-z0-9_-]+)\b")
 TTL = re.compile(r"\bttl=(\d+)m\b")
 UNTIL = re.compile(r"\buntil=(\d{6}\.\d{4})\b")
-# A path counts if it ends in a file extension. and/or and Node.js do not.
+# see path/file counts, any extension. A slash path with a dot counts. and/or does not.
 PATHISH = re.compile(
-    r"(?:[\w.-]+/)+[\w.-]+\.(?:md|py|txt|l|yml)|see\s+[\w.-]+\.(?:md|py|txt|l|yml)\b",
+    r"see\s+[\w./-]+|(?:[\w.-]+/)+[\w.-]*\.[\w.-]+",
     re.I,
 )
 KINDS = "ATFDM"
@@ -136,17 +136,23 @@ def _absurdly_after(anchor, ts):
 
 
 def pick_now(recs):
-    """Latest log ts. A ts more than 400 days ahead of the lower quartile is a typo.
+    """Latest ts in the largest cluster. A gap over 400 days starts a new cluster.
 
-    A pause of days or weeks is not a typo. Two year-99 lines do not move the clock
-    while the bulk of the log is earlier.
+    Daily work for years stays one cluster, so the clock does not freeze.
+    A year-99 typo is its own cluster and does not move the clock while the
+    earlier cluster is larger. A one-digit month typo is not a gap this size.
     """
     ts = sorted({r.ts for r in recs if valid_ts(r.ts)})
     if not ts:
         return utcnow(), None
-    anchor = ts[len(ts) // 4]
-    kept = [t for t in ts if not _absurdly_after(anchor, t)]
-    clock = kept[-1] if kept else ts[-1]
+    clusters = [[ts[0]]]
+    for t in ts[1:]:
+        if _absurdly_after(clusters[-1][-1], t):
+            clusters.append([t])
+        else:
+            clusters[-1].append(t)
+    best = max(clusters, key=lambda c: (len(c), c[-1]))
+    clock = best[-1]
     outlier = ts[-1] if ts[-1] != clock else None
     return clock, outlier
 

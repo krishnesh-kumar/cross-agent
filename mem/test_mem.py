@@ -6,6 +6,7 @@ import shutil
 import tempfile
 import unittest
 import importlib.util
+from datetime import datetime, timedelta
 
 _spec = importlib.util.spec_from_file_location(
     "memtool", os.path.join(os.path.dirname(os.path.abspath(__file__)), "mem.py"))
@@ -180,6 +181,17 @@ class MemTest(unittest.TestCase):
         self.assertEqual(st["Tcl1"]["status"], "claim")
         self.assertTrue(any("ignored future ts" in w for w in warns))
 
+    def test_long_log_clock_does_not_freeze(self):
+        lines = []
+        for i in range(600):
+            dt = datetime(2026, 1, 1) + timedelta(days=i)
+            lines.append(dt.strftime("%y%m%d") + ".1000|cl|Fcl%d|live|day %d" % (i + 1, i))
+        self.write("cl", lines)
+        recs, _ = mem.load()
+        clock, outlier = mem.pick_now(recs)
+        self.assertEqual(clock, lines[-1].split("|")[0])
+        self.assertIsNone(outlier)
+
     def test_pause_is_not_a_typo(self):
         self.write("cl", ["260928.0900|cl|Tcl1|claim|working", "260928.0905|cl|Fcl1|live|x"])
         self.write("gk", ["260930.1200|gk|Fgk1|live|first write after a 2-day pause"])
@@ -205,7 +217,7 @@ class MemTest(unittest.TestCase):
         self.write("cl", ["260901.1000|cl|Fcl1|live|" + "uses Node.js and/or TCP/IP " + "x" * 70])
         self.write("gpt", ["260901.1100|gpt|Fgpt1|live|" + "long " + "x" * 70 + " see mem/notes/x.md"])
         self.write("gk", ["260901.1200|gk|Fgk1|live|" + "names mem/mem.py and .github/workflows/mem.yml " + "x" * 40])
-        self.write("gm", ["260901.1300|gm|Fgm1|live|" + "See docs/a.md " + "x" * 80])
+        self.write("gm", ["260901.1300|gm|Fgm1|live|" + "See mem/ci_commit.sh and mem/log/ " + "x" * 50])
         _, _, warns = self.state(now="260901.1300")
         self.assertTrue(any("Fcl1 fact >80" in w for w in warns))
         self.assertFalse(any("Fgpt1 fact" in w for w in warns))
