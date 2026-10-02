@@ -174,23 +174,25 @@ class MemTest(unittest.TestCase):
         self.assertEqual(st, {})
         self.assertEqual(warns, [])
 
-    def test_future_typo_does_not_expire_claims(self):
+    def test_future_typo_moves_the_clock(self):
         self.write("cl", ["260930.1000|cl|Tcl1|claim|working", "260930.1010|cl|Fcl1|live|x"])
-        self.write("gk", ["991231.2358|gk|Fgk9|live|typo", "991231.2359|gk|Fgk8|live|same broken clock"])
+        self.write("gk", ["991231.2359|gk|Fgk8|live|broken clock"])
         st, _, warns = self.state()
-        self.assertEqual(st["Tcl1"]["status"], "claim")
-        self.assertTrue(any("ignored future ts" in w for w in warns))
+        self.assertEqual(st["Tcl1"]["status"], "open")
+        self.assertFalse(any("ignored future" in w for w in warns))
 
-    def test_long_log_clock_does_not_freeze(self):
+    def test_long_pause_does_not_freeze_the_clock(self):
         lines = []
-        for i in range(600):
+        for i in range(30):
             dt = datetime(2026, 1, 1) + timedelta(days=i)
             lines.append(dt.strftime("%y%m%d") + ".1000|cl|Fcl%d|live|day %d" % (i + 1, i))
+        lines.append("280120.1000|cl|Fcl99|live|resumed after a long pause")
+        lines.append("280120.1100|cl|Tcl1|claim|working")
         self.write("cl", lines)
         recs, _ = mem.load()
-        clock, outlier = mem.pick_now(recs)
-        self.assertEqual(clock, lines[-1].split("|")[0])
-        self.assertIsNone(outlier)
+        self.assertEqual(mem.pick_now(recs), "280120.1100")
+        st, _, _ = self.state()
+        self.assertEqual(st["Tcl1"]["status"], "claim")
 
     def test_pause_is_not_a_typo(self):
         self.write("cl", ["260928.0900|cl|Tcl1|claim|working", "260928.0905|cl|Fcl1|live|x"])
@@ -214,7 +216,7 @@ class MemTest(unittest.TestCase):
         self.assertTrue(any("conflict #test" in w for w in warns))
 
     def test_path_hint_rejects_dotted_words(self):
-        self.write("cl", ["260901.1000|cl|Fcl1|live|" + "uses Node.js and/or TCP/IP " + "x" * 70])
+        self.write("cl", ["260901.1000|cl|Fcl1|live|" + "uses Node.js and/or see above " + "x" * 60])
         self.write("gpt", ["260901.1100|gpt|Fgpt1|live|" + "long " + "x" * 70 + " see mem/notes/x.md"])
         self.write("gk", ["260901.1200|gk|Fgk1|live|" + "names mem/mem.py and .github/workflows/mem.yml " + "x" * 40])
         self.write("gm", ["260901.1300|gm|Fgm1|live|" + "See mem/ci_commit.sh and mem/log/ " + "x" * 50])

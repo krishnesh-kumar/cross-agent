@@ -21,7 +21,7 @@ Rules:
 - Append to your own month file only. Never edit or delete a line. Never touch another handle's file.
 - Supersede, never delete: new F or D line with !oldID.
 - Two live decisions with the same #tag and no ! = conflict warning. Facts may share a tag.
-- F longer than 80 chars should include see path/file. A dotted word is not a path.
+- F longer than 80 chars should include see path/file. A dotted word, or "see" plus a name, is not a path.
 - Human review: the human tells any agent in chat, e.g. "approve Tcl4" or "redo Tcl4, tests missing". Then run mem.py review <your handle> <id> ok|redo [note], or append to hu's file with text starting via:<your handle>. Only when the human said so in this conversation, never on your own reading. Allowed on done or peer.
 - Hand off: patch the T to open with a note of where you stopped. Continue: patch it to claim. Need a verb you lack: open a T with >handle of an agent that has it.
 - No secrets, ever: keys, tokens, cookies, passwords, .env contents. Advertise verbs, not credentials.

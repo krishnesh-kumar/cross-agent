@@ -22,7 +22,6 @@ REST = os.path.join(ROOT, "rest.l")
 HUMAN = "hu"
 SPEC = 1
 DEFAULT_TTL_MIN = 90
-ABSURD_MIN = 400 * 24 * 60  # a ts this far ahead of the log is a typo, not a pause
 
 TS = re.compile(r"^\d{6}\.\d{4}$")  # YYMMDD.HHMM UTC
 WHO = re.compile(r"^[a-z]{2,5}$")
@@ -31,9 +30,9 @@ REF = re.compile(r"(?<![A-Za-z0-9])([\^!])([ATFDM][a-z]{2,5}\d*)\b")
 TAG = re.compile(r"(?<![A-Za-z0-9])#([a-z0-9_-]+)\b")
 TTL = re.compile(r"\bttl=(\d+)m\b")
 UNTIL = re.compile(r"\buntil=(\d{6}\.\d{4})\b")
-# see path/file counts, any extension. A slash path with a dot counts. and/or does not.
+# see path/file counts. A slash path with a dot counts. "see above" and and/or do not.
 PATHISH = re.compile(
-    r"see\s+[\w./-]+|(?:[\w.-]+/)+[\w.-]*\.[\w.-]+",
+    r"see\s+[\w.-]*/[\w./-]+|(?:[\w.-]+/)+[\w.-]*\.[\w.-]+",
     re.I,
 )
 KINDS = "ATFDM"
@@ -93,9 +92,25 @@ def valid_ts(ts):
         return False
 
 
+def as_dt(ts):
+    return datetime.strptime("20" + ts, "%Y%m%d.%H%M")
+
+
 def ts_add_minutes(ts, minutes):
-    dt = datetime.strptime("20" + ts, "%Y%m%d.%H%M") + timedelta(minutes=int(minutes))
+    """Add minutes. A result past 2099 stays as a string that still sorts after 2099."""
+    dt = as_dt(ts) + timedelta(minutes=int(minutes))
+    if dt.year >= 2100:
+        return "999999.9999"
     return dt.strftime("%y%m%d.%H%M")
+
+
+def ts_before(a, b):
+    """Order by real date, so a wrapped two-digit year cannot sort earlier."""
+    if a == "999999.9999":
+        return False
+    if b == "999999.9999":
+        return True
+    return as_dt(a) < as_dt(b)
 
 
 def claim_until(ts, text):
@@ -128,33 +143,17 @@ def same_writer(a, b, registered=None):
     return len(long) == len(short) + 1 and long.startswith(short)
 
 
-def _absurdly_after(anchor, ts):
-    try:
-        return ts_add_minutes(anchor, ABSURD_MIN) < ts
-    except ValueError:
-        return True
-
-
 def pick_now(recs):
-    """Latest ts in the largest cluster. A gap over 400 days starts a new cluster.
+    """Latest valid log timestamp, compared as a date, not as a two-digit year.
 
-    Daily work for years stays one cluster, so the clock does not freeze.
-    A year-99 typo is its own cluster and does not move the clock while the
-    earlier cluster is larger. A one-digit month typo is not a gap this size.
+    A future typo moves the clock. A month typo, a year typo, and a year-99 typo
+    are the same kind of line: the fold cannot tell them from a real later write,
+    and a project resumed after a long pause must still expire claims.
     """
-    ts = sorted({r.ts for r in recs if valid_ts(r.ts)})
+    ts = [r.ts for r in recs if valid_ts(r.ts)]
     if not ts:
-        return utcnow(), None
-    clusters = [[ts[0]]]
-    for t in ts[1:]:
-        if _absurdly_after(clusters[-1][-1], t):
-            clusters.append([t])
-        else:
-            clusters[-1].append(t)
-    best = max(clusters, key=lambda c: (len(c), c[-1]))
-    clock = best[-1]
-    outlier = ts[-1] if ts[-1] != clock else None
-    return clock, outlier
+        return utcnow()
+    return max(ts, key=as_dt)
 
 
 def load():
@@ -201,18 +200,15 @@ def load():
 
 
 def fold(recs, now=None):
-    """Replay records. now defaults to the latest log ts, ignoring a lone future typo.
+    """Replay records. now defaults to the latest log timestamp, compared as a date.
 
     Policy misses (law, self-ok, peer-before-done) are warnings. The fold ignores them.
     They are not errors: an append-only log cannot delete the bad line, and check must
     not stay red forever. Format errors never reach here.
     """
-    outlier = None
     if now is None:
-        now, outlier = pick_now(recs)
+        now = pick_now(recs)
     st, warns = {}, []
-    if outlier:
-        warns.append("ignored future ts %s; clock stays %s" % (outlier, now))
     registered = {r.who for r in recs if r.id == "A" + r.who}
     known = {r.id for r in recs}
     for r in recs:
@@ -286,7 +282,7 @@ def fold(recs, now=None):
                 elif t["status"] not in CLOSED:
                     t.update(status="old", who=r.who, ts=r.ts, note="superseded by " + r.id)
     for e in st.values():
-        if e["kind"] == "T" and e["status"] == "claim" and e.get("until") and e["until"] <= now:
+        if e["kind"] == "T" and e["status"] == "claim" and e.get("until") and not ts_before(now, e["until"]):
             warns.append("%s claim expired at %s, back to open" % (e["id"], e["until"]))
             e["status"] = "open"
             e["note"] = ((e.get("note") or "") + " claim expired").strip()
@@ -308,7 +304,7 @@ def fold(recs, now=None):
 
 def snapshot(recs, errs, st, warns):
     """Render the capped live view. Law rows stay ahead of live rows so they are last to overflow."""
-    upto, _ = pick_now(recs)
+    upto = pick_now(recs)
     sections = (
         ("agents", "A", lambda e: e["status"] == "on"),
         ("tasks", "T", lambda e: e["status"] not in ("ok", "drop")),
