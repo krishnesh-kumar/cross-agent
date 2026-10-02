@@ -22,7 +22,7 @@ REST = os.path.join(ROOT, "rest.l")
 HUMAN = "hu"
 SPEC = 1
 DEFAULT_TTL_MIN = 90
-OUTLIER_MIN = 26 * 60  # a lone ts this far ahead of the rest is a typo, not the clock
+ABSURD_MIN = 400 * 24 * 60  # a ts this far ahead of the log is a typo, not a pause
 
 TS = re.compile(r"^\d{6}\.\d{4}$")  # YYMMDD.HHMM UTC
 WHO = re.compile(r"^[a-z]{2,5}$")
@@ -31,9 +31,9 @@ REF = re.compile(r"(?<![A-Za-z0-9])([\^!])([ATFDM][a-z]{2,5}\d*)\b")
 TAG = re.compile(r"(?<![A-Za-z0-9])#([a-z0-9_-]+)\b")
 TTL = re.compile(r"\bttl=(\d+)m\b")
 UNTIL = re.compile(r"\buntil=(\d{6}\.\d{4})\b")
-# A slash path counts even without "see". "see file.md" counts. Node.js does not.
+# A path counts if it ends in a file extension. and/or and Node.js do not.
 PATHISH = re.compile(
-    r"(?:[\w.-]+/)+[\w.-]+|see\s+[\w.-]+\.(?:md|py|txt|l)\b",
+    r"(?:[\w.-]+/)+[\w.-]+\.(?:md|py|txt|l|yml)|see\s+[\w.-]+\.(?:md|py|txt|l|yml)\b",
     re.I,
 )
 KINDS = "ATFDM"
@@ -114,35 +114,41 @@ def claim_until(ts, text):
 
 
 def same_writer(a, b, registered=None):
-    """cl and an unregistered clb are the same running identity. Not cryptographic.
+    """cl and clb are the same running identity, even if clb registered. Not cryptographic.
 
-    A one-letter suffix counts only when the longer handle has no A line of its own.
-    gp and gpt are different agents once both are registered.
+    A one-letter suffix always counts. Do not pick a handle that is another handle plus one letter.
+    registered is unused; kept so callers do not change.
     """
+    del registered
     if not a or not b:
         return False
     if a == b:
         return True
     short, long = (a, b) if len(a) < len(b) else (b, a)
-    if len(long) != len(short) + 1 or not long.startswith(short):
-        return False
-    if registered and short in registered and long in registered:
-        return False
-    return True
+    return len(long) == len(short) + 1 and long.startswith(short)
+
+
+def _absurdly_after(anchor, ts):
+    try:
+        return ts_add_minutes(anchor, ABSURD_MIN) < ts
+    except ValueError:
+        return True
 
 
 def pick_now(recs):
-    """Latest real log ts. A lone timestamp more than a day ahead of the rest is a typo."""
+    """Latest log ts. A ts more than 400 days ahead of the lower quartile is a typo.
+
+    A pause of days or weeks is not a typo. Two year-99 lines do not move the clock
+    while the bulk of the log is earlier.
+    """
     ts = sorted({r.ts for r in recs if valid_ts(r.ts)})
     if not ts:
         return utcnow(), None
-    if len(ts) >= 2:
-        try:
-            if ts_add_minutes(ts[-2], OUTLIER_MIN) < ts[-1]:
-                return ts[-2], ts[-1]
-        except ValueError:
-            return ts[-2], ts[-1]
-    return ts[-1], None
+    anchor = ts[len(ts) // 4]
+    kept = [t for t in ts if not _absurdly_after(anchor, t)]
+    clock = kept[-1] if kept else ts[-1]
+    outlier = ts[-1] if ts[-1] != clock else None
+    return clock, outlier
 
 
 def load():
@@ -265,11 +271,12 @@ def fold(recs, now=None):
                     warns.append("%s refers to unknown %s (%s:%d)" % (r.id, tgt, r.file, r.line))
             elif sigil == "!" and tgt != r.id:
                 if t.get("status") == "law" and r.who != HUMAN:
-                    warns.append("%s cannot supersede law %s (%s:%d)" % (r.id, tgt, r.file, r.line))
                     cur = st.get(r.id)
-                    if cur and cur["kind"] in "FD" and cur.get("status") not in CLOSED:
-                        cur["status"] = "wrong"
-                        cur["note"] = "refused supersede of law " + tgt
+                    if cur and cur["kind"] in "FD":
+                        warns.append("%s cannot supersede law %s (%s:%d)" % (r.id, tgt, r.file, r.line))
+                        if cur.get("status") not in CLOSED:
+                            cur["status"] = "wrong"
+                            cur["note"] = "refused supersede of law " + tgt
                 elif t["status"] not in CLOSED:
                     t.update(status="old", who=r.who, ts=r.ts, note="superseded by " + r.id)
     for e in st.values():
@@ -295,7 +302,7 @@ def fold(recs, now=None):
 
 def snapshot(recs, errs, st, warns):
     """Render the capped live view. Law rows stay ahead of live rows so they are last to overflow."""
-    upto = max((r.ts for r in recs if valid_ts(r.ts)), default=utcnow())
+    upto, _ = pick_now(recs)
     sections = (
         ("agents", "A", lambda e: e["status"] == "on"),
         ("tasks", "T", lambda e: e["status"] not in ("ok", "drop")),

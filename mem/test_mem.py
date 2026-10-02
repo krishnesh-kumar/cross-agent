@@ -92,18 +92,18 @@ class MemTest(unittest.TestCase):
         self.assertTrue(any("not done" in w for w in warns))
 
     def test_suffixed_handle_cannot_self_peer(self):
-        self.write("cl", ["260930.1000|cl|Acl|on|verbs", "260930.1000|cl|Tcl1|done|t"])
-        self.write("clb", ["260930.1100|clb|Tcl1|peer|lgtm"])
+        self.write("cl", ["260930.0900|cl|Acl|on|x", "260930.1000|cl|Tcl1|done|t"])
+        self.write("clb", ["260930.1050|clb|Aclb|on|2nd instance", "260930.1100|clb|Tcl1|peer|lgtm"])
         st, _, warns = self.state(now="260930.1100")
         self.assertEqual(st["Tcl1"]["status"], "done")
         self.assertTrue(any("self-approval" in w for w in warns))
 
-    def test_registered_prefix_is_a_different_agent(self):
+    def test_one_letter_extension_is_the_same_writer(self):
         self.write("gp", ["260930.1000|gp|Agp|on|verbs", "260930.1000|gp|Tgp1|done|t"])
         self.write("gpt", ["260930.1001|gpt|Agpt|on|verbs", "260930.1100|gpt|Tgp1|ok|reviewed"])
         st, _, warns = self.state(now="260930.1100")
-        self.assertEqual(st["Tgp1"]["status"], "ok")
-        self.assertFalse(any("self-approval" in w for w in warns))
+        self.assertEqual(st["Tgp1"]["status"], "done")
+        self.assertTrue(any("self-approval" in w for w in warns))
 
     def test_hu_peer_is_not_self_approval(self):
         self.write("cl", ["260930.1000|cl|Tcl1|done|t"])
@@ -137,7 +137,7 @@ class MemTest(unittest.TestCase):
         st, _, warns = self.state(now="260930.1100")
         self.assertEqual(st["Tgk1"]["status"], "open")
         self.assertEqual(st["Dhu1"]["status"], "law")
-        self.assertTrue(any("cannot supersede law" in w for w in warns))
+        self.assertFalse(any("cannot supersede law" in w for w in warns))
 
     def test_expired_takeover_is_not_double_claim(self):
         self.write("cl", ["260930.1001|cl|Tcl1|claim|ttl=10m"])
@@ -174,11 +174,18 @@ class MemTest(unittest.TestCase):
         self.assertEqual(warns, [])
 
     def test_future_typo_does_not_expire_claims(self):
-        self.write("cl", ["260930.1000|cl|Tcl1|claim|working"])
-        self.write("gk", ["991231.2359|gk|Fgk9|live|typo in timestamp"])
+        self.write("cl", ["260930.1000|cl|Tcl1|claim|working", "260930.1010|cl|Fcl1|live|x"])
+        self.write("gk", ["991231.2358|gk|Fgk9|live|typo", "991231.2359|gk|Fgk8|live|same broken clock"])
         st, _, warns = self.state()
         self.assertEqual(st["Tcl1"]["status"], "claim")
         self.assertTrue(any("ignored future ts" in w for w in warns))
+
+    def test_pause_is_not_a_typo(self):
+        self.write("cl", ["260928.0900|cl|Tcl1|claim|working", "260928.0905|cl|Fcl1|live|x"])
+        self.write("gk", ["260930.1200|gk|Fgk1|live|first write after a 2-day pause"])
+        st, _, warns = self.state()
+        self.assertEqual(st["Tcl1"]["status"], "open")
+        self.assertFalse(any("ignored future" in w for w in warns))
 
     def test_agreeing_facts_are_not_conflicts(self):
         self.write("cl", [
@@ -195,7 +202,7 @@ class MemTest(unittest.TestCase):
         self.assertTrue(any("conflict #test" in w for w in warns))
 
     def test_path_hint_rejects_dotted_words(self):
-        self.write("cl", ["260901.1000|cl|Fcl1|live|" + "uses Node.js " + "x" * 80])
+        self.write("cl", ["260901.1000|cl|Fcl1|live|" + "uses Node.js and/or TCP/IP " + "x" * 70])
         self.write("gpt", ["260901.1100|gpt|Fgpt1|live|" + "long " + "x" * 70 + " see mem/notes/x.md"])
         self.write("gk", ["260901.1200|gk|Fgk1|live|" + "names mem/mem.py and .github/workflows/mem.yml " + "x" * 40])
         self.write("gm", ["260901.1300|gm|Fgm1|live|" + "See docs/a.md " + "x" * 80])
