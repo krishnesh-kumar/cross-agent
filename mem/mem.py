@@ -22,6 +22,7 @@ REST = os.path.join(ROOT, "rest.l")
 HUMAN = "hu"
 SPEC = 1
 DEFAULT_TTL_MIN = 90
+LONE_JUMP = timedelta(days=7)
 
 TS = re.compile(r"^\d{6}\.\d{4}$")  # YYMMDD.HHMM UTC
 WHO = re.compile(r"^[a-z]{2,5}$")
@@ -144,16 +145,20 @@ def same_writer(a, b, registered=None):
 
 
 def pick_now(recs):
-    """Latest valid log timestamp, compared as a date, not as a two-digit year.
+    """Latest valid timestamp. A lone jump more than 7 days ahead is not the clock.
 
-    A future typo moves the clock. A month typo, a year typo, and a year-99 typo
-    are the same kind of line: the fold cannot tell them from a real later write,
-    and a project resumed after a long pause must still expire claims.
+    One far-future line does not expire every claim or hide later records from `new`.
+    Two lines within 7 days of each other still move the clock: the fold cannot tell
+    them from a project resumed after a pause. Returns (clock, lone record or None).
     """
-    ts = [r.ts for r in recs if valid_ts(r.ts)]
-    if not ts:
-        return utcnow()
-    return max(ts, key=as_dt)
+    good = [r for r in recs if valid_ts(r.ts)]
+    if not good:
+        return utcnow(), None
+    ordered = sorted(good, key=lambda r: as_dt(r.ts))
+    latest = ordered[-1]
+    if len(ordered) >= 2 and as_dt(latest.ts) - as_dt(ordered[-2].ts) > LONE_JUMP:
+        return ordered[-2].ts, latest
+    return latest.ts, None
 
 
 def load():
@@ -200,15 +205,17 @@ def load():
 
 
 def fold(recs, now=None):
-    """Replay records. now defaults to the latest log timestamp, compared as a date.
+    """Replay records. now defaults to the latest log timestamp.
 
-    Policy misses (law, self-ok, peer-before-done) are warnings. The fold ignores them.
-    They are not errors: an append-only log cannot delete the bad line, and check must
-    not stay red forever. Format errors never reach here.
+    A lone timestamp more than 7 days ahead of the rest is warned and not used as the clock.
+    Policy misses are warnings. Format errors never reach here.
     """
+    lone = None
     if now is None:
-        now = pick_now(recs)
+        now, lone = pick_now(recs)
     st, warns = {}, []
+    if lone:
+        warns.append("lone ts %s is more than 7d ahead of the clock %s (%s:%d); not used" % (lone.ts, now, lone.file, lone.line))
     registered = {r.who for r in recs if r.id == "A" + r.who}
     known = {r.id for r in recs}
     for r in recs:
@@ -304,7 +311,7 @@ def fold(recs, now=None):
 
 def snapshot(recs, errs, st, warns):
     """Render the capped live view. Law rows stay ahead of live rows so they are last to overflow."""
-    upto = pick_now(recs)
+    upto, _ = pick_now(recs)
     sections = (
         ("agents", "A", lambda e: e["status"] == "on"),
         ("tasks", "T", lambda e: e["status"] not in ("ok", "drop")),

@@ -174,12 +174,21 @@ class MemTest(unittest.TestCase):
         self.assertEqual(st, {})
         self.assertEqual(warns, [])
 
-    def test_future_typo_moves_the_clock(self):
+    def test_lone_future_ts_does_not_move_the_clock(self):
         self.write("cl", ["260930.1000|cl|Tcl1|claim|working", "260930.1010|cl|Fcl1|live|x"])
-        self.write("gk", ["991231.2359|gk|Fgk8|live|broken clock"])
+        self.write("gk", ["991231.2300|gk|Fgk8|live|broken clock"])
         st, _, warns = self.state()
+        self.assertEqual(st["Tcl1"]["status"], "claim")
+        self.assertTrue(any("lone ts 991231.2300" in w for w in warns))
+        recs, errs = mem.load()
+        snap, _ = mem.snapshot(recs, errs, *mem.fold(recs))
+        self.assertIn("upto=260930.1010", snap.splitlines()[0])
+
+    def test_two_future_lines_still_move_the_clock(self):
+        self.write("cl", ["260930.1000|cl|Tcl1|claim|working"])
+        self.write("gk", ["991231.2300|gk|Fgk8|live|broken", "991231.2301|gk|Fgk9|live|same clock"])
+        st, _, _ = self.state()
         self.assertEqual(st["Tcl1"]["status"], "open")
-        self.assertFalse(any("ignored future" in w for w in warns))
 
     def test_long_pause_does_not_freeze_the_clock(self):
         lines = []
@@ -190,7 +199,7 @@ class MemTest(unittest.TestCase):
         lines.append("280120.1100|cl|Tcl1|claim|working")
         self.write("cl", lines)
         recs, _ = mem.load()
-        self.assertEqual(mem.pick_now(recs), "280120.1100")
+        self.assertEqual(mem.pick_now(recs)[0], "280120.1100")
         st, _, _ = self.state()
         self.assertEqual(st["Tcl1"]["status"], "claim")
 
